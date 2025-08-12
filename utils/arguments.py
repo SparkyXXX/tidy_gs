@@ -40,7 +40,6 @@ class ModelParams(ParamGroup):
         self._resolution = -1
         self._white_background = False
         self.sh_degree = 3
-        self.train_test_exp = False
         self.eval = False
         super().__init__(parser, "Loading Parameters", sentinel)
 

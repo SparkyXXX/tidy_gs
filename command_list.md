@@ -1,4 +1,5 @@
 ## 原版 3DGS 运行指令
+
 ```shell
 # 将输入图像和 COLMAP 数据转换为 3D Gaussian Splatting 训练所需的格式
 python convert.py -s data/Hub
@@ -11,7 +12,7 @@ python train.py -s data/Hub -m data/Hub/output --eval # 启用训练/测试集�
 python train.py -s data/Hub -m data/Hub/output -r 1 # 不要缩放宽度大于1.6k的图像
 python train.py -s data/Hub -m data/Hub/output --iterations	10000 # 指定训练迭代次数
 python train.py -s data/Hub -m data/Hub/output --debug # 启用调试模式，光栅化失败生成 dump 文件排查问题
-python train.py -s data/Hub -m data/Hub/output --debug_from 10000 # 从指定轮数开始启用调试模式 
+python train.py -s data/Hub -m data/Hub/output --debug_from 10000 # 从指定轮数开始启用调试模式
 python train.py -s data/Hub -m data/Hub/output --test_iterations 10000 20000 30000 # 计算测试集 L1和PSNR 的迭代次数
 python train.py -s data/Hub -m data/Hub/output --save_iterations 10000 20000 30000 # 保存模型的迭代次数
 python train.py -s data/Hub -m data/Hub/output --checkpoint_iterations # 保存 checkpoint 的迭代次数，用于断点续训
@@ -35,13 +36,10 @@ python metrics.py -m ./data/Hub/output ./data/another_scene/output # 批量计�
 ```
 
 ## 实验测试
+
 ```shell
 python train.py -s data/Hub -m data/Hub/output --iterations 100 --optimizer_type sparse_adam
-python train.py -s data/Hub -m data/Hub/output --iterations 30000 --optimizer_type sparse_adam --test_iterations 10000 20000 30000 --save_iterations 10000 20000 30000
-python train.py -s data/White1 -m data/White1/output --iterations 30000 --optimizer_type sparse_adam --test_iterations 10000 20000 30000 --save_iterations 10000 20000 30000
+python train.py -s data/Hub -m data/Hub/output --iterations 10000 --optimizer_type sparse_adam --test_iterations 3000 6000 10000 --save_iterations 3000 6000 10000
 
-python train.py -s data/City -m data/City/output --optimizer_type sparse_adam
-python train.py -s data/Garden -m data/Garden/output --optimizer_type sparse_adam --iterations 10000
-python render.py -m ./data/Garden/output
 python choose_camera.py --small_ply ./data/Garden/output/point_cloud/small_pcd.ply --big_ply ./data/Garden/output/point_cloud/big_pcd.ply --threshold 0.6 --source_path ./data/Garden
 ```

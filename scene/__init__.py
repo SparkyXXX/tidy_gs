@@ -1,6 +1,6 @@
 import os
 import random
-from scene.colmap_loader import sceneLoadTypeCallbacks
+from scene.colmap_loader import readColmapSceneInfo
 from scene.camera_utils import cameraList_from_camInfos
 from scene.gaussian_model import GaussianModel
 from utils.arguments import ModelParams
@@ -20,10 +20,7 @@ class Scene:
             print("Loading trained model at iteration {}".format(self.loaded_iter))
 
         if os.path.exists(os.path.join(model_params.source_path, "sparse")):
-            scene_info = sceneLoadTypeCallbacks["Colmap"](model_params.source_path, model_params.eval, model_params.train_test_exp)
-        elif os.path.exists(os.path.join(model_params.source_path, "transforms_train.json")):
-            print("Found transforms_train.json file, assuming Blender data set!")
-            scene_info = sceneLoadTypeCallbacks["Blender"](model_params.source_path, model_params.white_background, model_params.eval)
+            scene_info = readColmapSceneInfo(model_params.source_path, model_params.eval)
         else:
             assert False, "Wrong source path or Could not recognize scene type!"
         

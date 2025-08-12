@@ -21,7 +21,6 @@ class CameraParam(NamedTuple):
     fovy: float
     R: np.array
     T: np.array
-    is_test: bool
 
 class SceneInfo(NamedTuple):
     ply_path: str
@@ -162,21 +161,26 @@ def packageCameraInfos(path):
         extr = extrs[key]
         R = np.transpose(qvec2rotmat(extr.qvec))
         T = np.array(extr.tvec)
-        cam_info = CameraParam(intr=intr, extr=extr, fovx=fovx, fovy=fovy, R=R, T=T, is_test=False)
+        cam_info = CameraParam(intr=intr, extr=extr, fovx=fovx, fovy=fovy, R=R, T=T)
         cam_infos.append(cam_info)
     return cam_infos
 
-def readColmapSceneInfo(path, eval, train_test_exp, llffhold=8):
+def readColmapSceneInfo(path, eval, llffhold=8):
     cam_infos = packageCameraInfos(path)
 
     if eval:
-        cam_names = sorted([cam_info.extr.image_name for cam_info in cam_infos])
-        test_cam_names_list = [name for idx, name in enumerate(cam_names) if idx % llffhold == 0]
+        cam_names = sorted([image_name for image_name in cam_infos.extr.image_name])
+        test_cam_names_set = {name for idx, name in enumerate(cam_names) if idx % llffhold == 0}
     else:
-        test_cam_names_list = []
+        test_cam_names_set = set()
 
-    train_cam_infos = [c for c in cam_infos if train_test_exp or not c.is_test]
-    test_cam_infos = [c for c in cam_infos if c.is_test]
+    train_cam_infos = []
+    test_cam_infos = []
+    for c in cam_infos:
+        if c.extr.image_name in test_cam_names_set:
+            test_cam_infos.append(c)
+        else:
+            train_cam_infos.append(c)
 
     nerf_normalization = getNerfppNorm(train_cam_infos)
 

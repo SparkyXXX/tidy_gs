@@ -8,8 +8,7 @@ from utils.graphics_utils import getWorld2View, getProjectionMatrix, fov2focal
 
 class Camera(nn.Module):
     def __init__(self, resolution, R, T, FoVx, FoVy, image, image_name, uid,
-                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0,
-                 train_test_exp = False, is_test_dataset = False, is_test_view = False):
+                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0):
         super(Camera, self).__init__()
         self.uid = uid
         # self.colmap_id = colmap_id
@@ -26,12 +25,6 @@ class Camera(nn.Module):
             self.alpha_mask = resized_image_rgb[3:4, ...].cuda()
         else: 
             self.alpha_mask = torch.ones_like(resized_image_rgb[0:1, ...].cuda())
-
-        if train_test_exp and is_test_view:
-            if is_test_dataset:
-                self.alpha_mask[..., :self.alpha_mask.shape[-1] // 2] = 0
-            else:
-                self.alpha_mask[..., self.alpha_mask.shape[-1] // 2:] = 0
 
         self.original_image = gt_image.clamp(0.0, 1.0).cuda()
         self.image_width = self.original_image.shape[2]
@@ -72,8 +65,7 @@ def cameraList_from_camInfos(cam_infos, resolution_scale, model_params, is_test_
             scale = float(global_down) * float(resolution_scale)
             resolution = (int(orig_w / scale), int(orig_h / scale))
         camera = Camera(resolution, R=cam_info.R, T=cam_info.T, FoVx=cam_info.fovx, FoVy=cam_info.fovy,
-                  image=image, image_name=cam_info.extr.image_name, uid=idx,
-                  train_test_exp=model_params.train_test_exp, is_test_dataset=is_test_dataset, is_test_view=cam_info.is_test)
+                  image=image, image_name=cam_info.extr.image_name, uid=idx)
         camera_list.append(camera)
     return camera_list
 
