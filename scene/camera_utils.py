@@ -1,3 +1,4 @@
+import os
 import torch
 import numpy as np
 from PIL import Image
@@ -47,8 +48,10 @@ class Camera(nn.Module):
 WARNED = False
 def cameraList_from_camInfos(cam_infos, resolution_scale, model_params, is_test_dataset):
     camera_list = []
+    images_folder = os.path.join(model_params.source_path, "images")
     for id, cam_info in enumerate(cam_infos):
-        image = Image.open(cam_info.image_path)
+        image_path = os.path.join(images_folder, cam_info.extr.image_name)
+        image = Image.open(image_path)
         orig_w, orig_h = image.size
         if model_params.resolution in [1, 2, 4, 8]:
             resolution = round(orig_w/(resolution_scale * model_params.resolution)), round(orig_h/(resolution_scale * model_params.resolution))
@@ -68,8 +71,8 @@ def cameraList_from_camInfos(cam_infos, resolution_scale, model_params, is_test_
 
             scale = float(global_down) * float(resolution_scale)
             resolution = (int(orig_w / scale), int(orig_h / scale))
-        camera = Camera(resolution, R=cam_info.R, T=cam_info.T, FoVx=cam_info.FovX, FoVy=cam_info.FovY,
-                  image=image, image_name=cam_info.image_name, uid=id,
+        camera = Camera(resolution, R=cam_info.R, T=cam_info.T, FoVx=cam_info.fovx, FoVy=cam_info.fovy,
+                  image=image, image_name=cam_info.extr.image_name, uid=id,
                   train_test_exp=model_params.train_test_exp, is_test_dataset=is_test_dataset, is_test_view=cam_info.is_test)
         camera_list.append(camera)
     return camera_list
