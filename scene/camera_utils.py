@@ -7,10 +7,10 @@ from utils.general_utils import PILtoTorch
 from utils.graphics_utils import getWorld2View, getProjectionMatrix, fov2focal
 
 class Camera(nn.Module):
-    def __init__(self, resolution, R, T, FoVx, FoVy, image, image_name, uid,
+    def __init__(self, resolution, R, T, FoVx, FoVy, image, image_name,
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0):
         super(Camera, self).__init__()
-        self.uid = uid
+        # self.uid = uid
         # self.colmap_id = colmap_id
         self.R = R
         self.T = T
@@ -39,34 +39,11 @@ class Camera(nn.Module):
         self.projection_matrix = (self.world_view_transform.unsqueeze(0).bmm(temp_projection_matrix.unsqueeze(0))).squeeze(0)
         self.camera_center = self.world_view_transform.inverse()[3, :3]
 
-WARNED = False
-def cameraList_from_camInfos(cam_infos, resolution_scale, model_params, is_test_dataset):
+def cameraList_from_camInfos(cam_infos, model_params):
     camera_list = []
-    images_folder = os.path.join(model_params.source_path, "images")
-
-    for idx, cam_info in enumerate(cam_infos):
-        image = Image.open(os.path.join(images_folder, cam_info.extr.image_name))
-        orig_w, orig_h = image.size
-        if model_params.resolution in [1, 2, 4, 8]:
-            resolution = round(orig_w/(resolution_scale * model_params.resolution)), round(orig_h/(resolution_scale * model_params.resolution))
-        else:
-            if model_params.resolution == -1:
-                if orig_w > 1600:
-                    global WARNED
-                    if not WARNED:
-                        print("[ INFO ] Encountered quite large input images (>1.6K pixels width), rescaling to 1.6K.\n "
-                            "If this is not desired, please explicitly specify '--resolution/-r' as 1")
-                        WARNED = True
-                    global_down = orig_w / 1600
-                else:
-                    global_down = 1
-            else:
-                global_down = orig_w / model_params.resolution
-
-            scale = float(global_down) * float(resolution_scale)
-            resolution = (int(orig_w / scale), int(orig_h / scale))
-        camera = Camera(resolution, R=cam_info.R, T=cam_info.T, FoVx=cam_info.fovx, FoVy=cam_info.fovy,
-                  image=image, image_name=cam_info.extr.image_name, uid=idx)
+    for cam_info in cam_infos:
+        camera = Camera(resolution, R=cam_info.R_w2c, T=cam_info.T_w2c, FoVx=cam_info.fovx, FoVy=cam_info.fovy,
+                  image=image, image_name=cam_info.extr.image_name)
         camera_list.append(camera)
     return camera_list
 

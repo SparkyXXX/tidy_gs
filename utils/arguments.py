@@ -37,7 +37,7 @@ class ModelParams(ParamGroup):
     def __init__(self, parser, sentinel=False):
         self._source_path = ""
         self._model_path = ""
-        self._resolution = -1
+        self._resolution_scale = -1
         self._white_background = False
         self.sh_degree = 3
         self.eval = False

@@ -8,7 +8,7 @@ from utils.general_utils import searchForMaxIteration
 
 class Scene:
     gaussians : GaussianModel
-    def __init__(self, model_params : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True, resolution_scales=[1.0]):
+    def __init__(self, model_params : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True):
         self.model_path = model_params.model_path
         self.loaded_iter = None
 
@@ -28,12 +28,9 @@ class Scene:
             random.shuffle(scene_info.train_cameras)
             random.shuffle(scene_info.test_cameras)
         
-        self.train_cameras = {}
-        self.test_cameras = {}
         self.cameras_extent = scene_info.nerf_normalization["radius"]
-        for resolution_scale in resolution_scales:
-            self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale, model_params, False)
-            self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, model_params, True)
+        self.train_cameras = cameraList_from_camInfos(scene_info.train_cameras, model_params)
+        self.test_cameras = cameraList_from_camInfos(scene_info.test_cameras, model_params)
         
         self.gaussians = gaussians
         if self.loaded_iter:

@@ -2,25 +2,33 @@ import os
 import struct
 import collections
 import numpy as np
+from PIL import Image
 from typing import NamedTuple
 from plyfile import PlyData, PlyElement
-from utils.graphics_utils import getWorld2View, focal2fov
+import sys
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(project_root)
+from utils.graphics_utils import getWorld2View, focal2fov, qvec2rotmat
+
+Intrinsics = collections.namedtuple("Intrinsics", ["fx", "fy", "cx", "cy", "width", "height"])
+Extrinsics = collections.namedtuple("Extrinsics", ["qvec_w2c", "tvec_w2c"])
+ImageInfos = collections.namedtuple("ImageInfos", ["image_name", "image_object", "resolution"])
+
+class Camera(NamedTuple):
+    intr: Intrinsics
+    extr: Extrinsics
+    image: ImageInfos
+    fovx: float
+    fovy: float
+    R_w2c: np.ndarray
+    T_w2c: np.ndarray
+
+# CameraParams = collections.namedtuple("CameraParams", ["intr", "extr", "fovx", "fovy", "R_w2c", "T_w2c"])
 
 class BasicPointCloud(NamedTuple):
     points : np.array
     normals : np.array
     colors : np.array
-
-Intrinsics = collections.namedtuple("Intrinsics", ["fx", "fy", "cx", "cy", "width", "height"])
-Extrinsics = collections.namedtuple("Extrinsics", ["qvec_w2c", "tvec_w2c", "image_name"])
-
-class CameraParam(NamedTuple):
-    intrinsics_tuple: Intrinsics
-    extrinsics_dict: Extrinsics
-    fovx: float
-    fovy: float
-    R_w2c: np.array
-    T_w2c: np.array
 
 class SceneInfo(NamedTuple):
     ply_path: str
@@ -28,31 +36,6 @@ class SceneInfo(NamedTuple):
     train_cameras: list
     test_cameras: list
     nerf_normalization: dict
-
-def qvec2rotmat(qvec):
-    return np.array([
-        [1 - 2 * qvec[2]**2 - 2 * qvec[3]**2,
-         2 * qvec[1] * qvec[2] - 2 * qvec[0] * qvec[3],
-         2 * qvec[3] * qvec[1] + 2 * qvec[0] * qvec[2]],
-        [2 * qvec[1] * qvec[2] + 2 * qvec[0] * qvec[3],
-         1 - 2 * qvec[1]**2 - 2 * qvec[3]**2,
-         2 * qvec[2] * qvec[3] - 2 * qvec[0] * qvec[1]],
-        [2 * qvec[3] * qvec[1] - 2 * qvec[0] * qvec[2],
-         2 * qvec[2] * qvec[3] + 2 * qvec[0] * qvec[1],
-         1 - 2 * qvec[1]**2 - 2 * qvec[2]**2]])
-
-def rotmat2qvec(R):
-    Rxx, Ryx, Rzx, Rxy, Ryy, Rzy, Rxz, Ryz, Rzz = R.flat
-    K = np.array([
-        [Rxx - Ryy - Rzz, 0, 0, 0],
-        [Ryx + Rxy, Ryy - Rxx - Rzz, 0, 0],
-        [Rzx + Rxz, Rzy + Ryz, Rzz - Rxx - Ryy, 0],
-        [Ryz - Rzy, Rzx - Rxz, Rxy - Ryx, Rxx + Ryy + Rzz]]) / 3.0
-    eigvals, eigvecs = np.linalg.eigh(K)
-    qvec = eigvecs[[3, 0, 1, 2], np.argmax(eigvals)]
-    if qvec[0] < 0:
-        qvec *= -1
-    return qvec
 
 def read_next_bytes(fid, num_bytes, format_char_sequence, endian_character="<"):
     data = fid.read(num_bytes)
@@ -77,10 +60,9 @@ def read_points3D_binary(path_to_model_file):
             rgbs[p_id] = rgb
     return xyzs, rgbs
 
-
-def read_intrinsics_binary(path_to_model_file):
+def read_intrinsics_binary(path):
     num_params = 4
-    with open(path_to_model_file, "rb") as fid:
+    with open(os.path.join(path, "sparse/0/cameras.bin"), "rb") as fid:
         num_cameras_useless = read_next_bytes(fid, 8, "Q")[0]
         camera_properties_useless = read_next_bytes(fid, num_bytes=24, format_char_sequence="iiQQ")
         camera_id_useless = camera_properties_useless[0]
@@ -91,9 +73,10 @@ def read_intrinsics_binary(path_to_model_file):
         intrinsics_tuple = Intrinsics(fx=intrinsics[0], fy=intrinsics[1], cx=intrinsics[2], cy=intrinsics[3], width=width, height=height);
     return intrinsics_tuple
 
-def read_extrinsics_binary(path_to_model_file):
+def read_extrinsics_binary(path):
     extrinsics_dict = {}
-    with open(path_to_model_file, "rb") as fid:
+    image_names_dict = {}
+    with open(os.path.join(path, "sparse/0/images.bin"), "rb") as fid:
         num_reg_images = read_next_bytes(fid, 8, "Q")[0]
         for _ in range(num_reg_images):
             binary_image_properties = read_next_bytes(fid, num_bytes=64, format_char_sequence="idddddddi")
@@ -110,8 +93,41 @@ def read_extrinsics_binary(path_to_model_file):
             x_y_id_s_useless = read_next_bytes(fid, num_bytes=24*num_points2D_useless, format_char_sequence="ddq"*num_points2D_useless)
             xys_useless = np.column_stack([tuple(map(float, x_y_id_s_useless[0::3])), tuple(map(float, x_y_id_s_useless[1::3]))])
             point3D_ids_useless = np.array(tuple(map(int, x_y_id_s_useless[2::3])))
-            extrinsics_dict[image_idx] = Extrinsics(qvec_w2c=qvec_w2c, tvec_w2c=tvec_w2c, image_name=image_name)
-    return extrinsics_dict
+            extrinsics_dict[image_idx] = Extrinsics(qvec_w2c=qvec_w2c, tvec_w2c=tvec_w2c)
+            image_names_dict[image_idx] = image_name
+    return extrinsics_dict, image_names_dict
+
+def combine_image_infos(image_names_dict, path, model_params):
+    image_infos_dict = {}
+    for idx in range(len(image_names_dict)):
+        image_name = image_names_dict[idx+1]
+        image_object = Image.open(os.path.join(path, "images", image_name))
+        orig_w, orig_h = image_object.size
+        if model_params.resolution_scale == -1:
+            resolution_scale = (orig_w / 1600) if (orig_w > 1600) else 1
+            resolution = (round(orig_w / resolution_scale), round(orig_h / resolution_scale))
+        else:
+            resolution = round(orig_w / model_params.resolution_scale), round(orig_h / model_params.resolution_scale)
+        image_info = ImageInfos(image_name=image_name, image_object=image_object, resolution=resolution)
+        image_infos_dict[idx+1] = image_info
+    return image_infos_dict
+
+def packageCamera(path, model_params):
+    extrs, image_names = read_extrinsics_binary(path)
+    intr = read_intrinsics_binary(path)
+    images = combine_image_infos(image_names, path, model_params)
+    camera_list = []
+
+    fovx = focal2fov(intr.fx, intr.width)
+    fovy = focal2fov(intr.fy, intr.height)
+    for key in extrs:
+        extr = extrs[key]
+        image = images[key]
+        R_w2c = qvec2rotmat(extr.qvec_w2c)
+        T_w2c = extr.tvec_w2c
+        camera = Camera(intr=intr, extr=extr, image=image ,fovx=fovx, fovy=fovy, R_w2c=R_w2c, T_w2c=T_w2c)
+        camera_list.append(camera)
+    return camera_list
 
 def getNerfppNorm(cam_info):
     def get_center_and_diag(cam_centers):
@@ -124,7 +140,7 @@ def getNerfppNorm(cam_info):
 
     cam_centers = []
     for cam in cam_info:
-        W2C = getWorld2View(cam.R, cam.T)
+        W2C = getWorld2View(cam.R_w2c, cam.T_w2c)
         C2W = np.linalg.inv(W2C)
         cam_centers.append(C2W[:3, 3:4])
     center, diagonal = get_center_and_diag(cam_centers)
@@ -153,22 +169,8 @@ def storePly(path, xyz, rgb):
     ply_data = PlyData([vertex_element])
     ply_data.write(path)
 
-def packageCameraInfos(path):    
-    extrs = read_extrinsics_binary(os.path.join(path, "sparse/0", "images.bin"))
-    intr = read_intrinsics_binary(os.path.join(path, "sparse/0", "cameras.bin"))
-    fovx = focal2fov(intr.fx, intr.width)
-    fovy = focal2fov(intr.fy, intr.height)
-    cam_infos = []
-    for _, key in enumerate(extrs):
-        extr = extrs[key]
-        R = np.transpose(qvec2rotmat(extr.qvec))
-        T = np.array(extr.tvec)
-        cam_info = CameraParam(intr=intr, extr=extr, fovx=fovx, fovy=fovy, R=R, T=T)
-        cam_infos.append(cam_info)
-    return cam_infos
-
 def readColmapSceneInfo(path, eval, llffhold=8):
-    cam_infos = packageCameraInfos(path)
+    cam_infos = package_camera_params(path)
 
     if eval:
         cam_names = sorted([image_name for image_name in cam_infos.extr.image_name])
@@ -204,6 +206,11 @@ def readColmapSceneInfo(path, eval, llffhold=8):
                            ply_path=ply_path)
     return scene_info
 
-sceneLoadTypeCallbacks = {
-    "Colmap": readColmapSceneInfo,
-}
+class NB(): 
+    def __init__(self):
+        self.resolution_scale = -1
+
+if __name__ == "__main__":
+    MyNB = NB()
+    MyCamList = packageCamera("./data/Hub", MyNB)
+    print("Done")
