@@ -10,20 +10,20 @@ def render(viewpoint_camera, gaussian : GaussianModel, pipe, bg_color : torch.Te
         screenspace_points.retain_grad()
     except:
         pass
-    tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
-    tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
+    tanfovx = math.tan(viewpoint_camera.view.fovx * 0.5)
+    tanfovy = math.tan(viewpoint_camera.view.fovy * 0.5)
 
     raster_settings = GaussianRasterizationSettings(
-        image_height=int(viewpoint_camera.image_height),
-        image_width=int(viewpoint_camera.image_width),
+        image_height=int(viewpoint_camera.img.img_height),
+        image_width=int(viewpoint_camera.img.img_width),
         tanfovx=tanfovx,
         tanfovy=tanfovy,
         bg=bg_color,
         scale_modifier=scaling_modifier,
-        viewmatrix=viewpoint_camera.world_view_transform,
-        projmatrix=viewpoint_camera.projection_matrix,
+        viewmatrix=viewpoint_camera.view.w2c_cuda,
+        projmatrix=viewpoint_camera.view.proj_cuda,
         sh_degree=gaussian.active_sh_degree,
-        campos=viewpoint_camera.camera_center,
+        campos=viewpoint_camera.view.cam_center_cuda,
         prefiltered=False,
         debug=pipe.debug,
         antialiasing=pipe.antialiasing

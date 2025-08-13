@@ -1,29 +1,35 @@
 import os
 import struct
+import torch
 import collections
 import numpy as np
+from torch import nn
 from PIL import Image
 from typing import NamedTuple
 from plyfile import PlyData, PlyElement
+
 import sys
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(project_root)
-from utils.graphics_utils import getWorld2View, focal2fov, qvec2rotmat
+from utils.graphics_utils import focal2fov, qvec2rotmat, getWorld2View, getProjectionMatrix
+from utils.general_utils import PILtoTorch
 
 Intrinsics = collections.namedtuple("Intrinsics", ["fx", "fy", "cx", "cy", "width", "height"])
 Extrinsics = collections.namedtuple("Extrinsics", ["qvec_w2c", "tvec_w2c"])
-ImageInfos = collections.namedtuple("ImageInfos", ["image_name", "image_object", "resolution"])
+Viewpoint = collections.namedtuple("Viewpoint", ["fovx", "fovy", "w2c_np", "w2c_cuda", "proj_cuda", "whole_transform_cuda", "cam_center_cuda"])
+ImageInfos = collections.namedtuple("ImageInfos", ["img_name", "img_width", "img_height", "img_object_pil", "img_object_cuda"])
 
-class Camera(NamedTuple):
+class Camera(nn.Module):
     intr: Intrinsics
     extr: Extrinsics
-    image: ImageInfos
-    fovx: float
-    fovy: float
-    R_w2c: np.ndarray
-    T_w2c: np.ndarray
-
-# CameraParams = collections.namedtuple("CameraParams", ["intr", "extr", "fovx", "fovy", "R_w2c", "T_w2c"])
+    view: Viewpoint
+    img: ImageInfos
+    def __init__(self, intr, extr, view, img):
+        super(Camera, self).__init__()
+        self.intr = intr
+        self.extr = extr
+        self.view = view
+        self.img = img
 
 class BasicPointCloud(NamedTuple):
     points : np.array
@@ -33,8 +39,8 @@ class BasicPointCloud(NamedTuple):
 class SceneInfo(NamedTuple):
     ply_path: str
     point_cloud: BasicPointCloud
-    train_cameras: list
-    test_cameras: list
+    # train_cameras: list
+    # test_cameras: list
     nerf_normalization: dict
 
 def read_next_bytes(fid, num_bytes, format_char_sequence, endian_character="<"):
@@ -97,39 +103,84 @@ def read_extrinsics_binary(path):
             image_names_dict[image_idx] = image_name
     return extrinsics_dict, image_names_dict
 
-def combine_image_infos(image_names_dict, path, model_params):
+def assemble_viewpoint(intr, extrs):
+    viewpoints_dict = {}
+    
+    zfar = 100.0
+    znear = 0.01
+    fovx = focal2fov(intr.fx, intr.width)
+    fovy = focal2fov(intr.fy, intr.height)
+    proj_cuda = getProjectionMatrix(znear, zfar, fovx, fovy).transpose(0, 1).cuda()
+
+    for key in extrs:
+        extr = extrs[key]
+        R_w2c = qvec2rotmat(extr.qvec_w2c)
+        T_w2c = extr.tvec_w2c
+        w2c_np = getWorld2View(R_w2c, T_w2c)
+        w2c_cuda = torch.tensor(w2c_np).transpose(0, 1).cuda()
+        cam_center_cuda = w2c_cuda.inverse()[3, :3]
+        whole_transform_cuda = (w2c_cuda.unsqueeze(0).bmm(proj_cuda.unsqueeze(0))).squeeze(0)
+
+        viewpoint = Viewpoint(fovx=fovx, fovy=fovy, w2c_np=w2c_np, w2c_cuda=w2c_cuda, proj_cuda=proj_cuda, 
+                              whole_transform_cuda=whole_transform_cuda, cam_center_cuda=cam_center_cuda)
+        viewpoints_dict[key] = viewpoint
+    return viewpoints_dict
+
+def assemble_image_infos(image_names_dict, path, model_params):
     image_infos_dict = {}
     for idx in range(len(image_names_dict)):
-        image_name = image_names_dict[idx+1]
-        image_object = Image.open(os.path.join(path, "images", image_name))
-        orig_w, orig_h = image_object.size
+        img_name = image_names_dict[idx+1]
+        img_object_pil = Image.open(os.path.join(path, "images", img_name))
+        orig_w, orig_h = img_object_pil.size
         if model_params.resolution_scale == -1:
             resolution_scale = (orig_w / 1600) if (orig_w > 1600) else 1
             resolution = (round(orig_w / resolution_scale), round(orig_h / resolution_scale))
         else:
             resolution = round(orig_w / model_params.resolution_scale), round(orig_h / model_params.resolution_scale)
-        image_info = ImageInfos(image_name=image_name, image_object=image_object, resolution=resolution)
-        image_infos_dict[idx+1] = image_info
+
+        resized_img_object_torch = PILtoTorch(img_object_pil, resolution)
+        gt_img_torch = resized_img_object_torch[:3, ...]
+        img_object_cuda = gt_img_torch.clamp(0.0, 1.0).cuda()
+        img_width = img_object_cuda.shape[2]
+        img_height = img_object_cuda.shape[1]
+
+        image_infos = ImageInfos(img_name=img_name, img_width=img_width, img_height=img_height,
+                                 img_object_pil=img_object_pil, img_object_cuda=img_object_cuda)
+        image_infos_dict[idx+1] = image_infos
     return image_infos_dict
 
-def packageCamera(path, model_params):
-    extrs, image_names = read_extrinsics_binary(path)
-    intr = read_intrinsics_binary(path)
-    images = combine_image_infos(image_names, path, model_params)
-    camera_list = []
+def packageCameras(path, model_params):
+    intr  = read_intrinsics_binary(path)
+    extrs, img_names = read_extrinsics_binary(path)
+    views = assemble_viewpoint(intr, extrs)
+    imgs = assemble_image_infos(img_names, path, model_params)
 
-    fovx = focal2fov(intr.fx, intr.width)
-    fovy = focal2fov(intr.fy, intr.height)
+    cam_list = []
     for key in extrs:
         extr = extrs[key]
-        image = images[key]
-        R_w2c = qvec2rotmat(extr.qvec_w2c)
-        T_w2c = extr.tvec_w2c
-        camera = Camera(intr=intr, extr=extr, image=image ,fovx=fovx, fovy=fovy, R_w2c=R_w2c, T_w2c=T_w2c)
-        camera_list.append(camera)
-    return camera_list
+        view = views[key]
+        img = imgs[key]
+        cam = Camera(intr=intr, extr=extr, view=view, img=img)
+        cam_list.append(cam)
+    return cam_list
 
-def getNerfppNorm(cam_info):
+def separateCameraToTrainTest(cam_list, eval, llffhold=8):
+    if eval:
+        img_names = sorted([cam.img.img_name for cam in cam_list])
+        test_img_names = {name for idx, name in enumerate(img_names) if idx % llffhold == 0}
+    else:
+        test_img_names = set()
+
+    train_cam_list = []
+    test_cam_list = []
+    for cam in cam_list:
+        if cam.img.img_name in test_img_names:
+            test_cam_list.append(cam)
+        else:
+            train_cam_list.append(cam)
+    return train_cam_list, test_cam_list
+
+def getNerfppNorm(cam_infos):
     def get_center_and_diag(cam_centers):
         cam_centers = np.hstack(cam_centers)
         avg_cam_center = np.mean(cam_centers, axis=1, keepdims=True)
@@ -139,8 +190,8 @@ def getNerfppNorm(cam_info):
         return center.flatten(), diagonal
 
     cam_centers = []
-    for cam in cam_info:
-        W2C = getWorld2View(cam.R_w2c, cam.T_w2c)
+    for cam in cam_infos:
+        W2C = cam.view.w2c_np
         C2W = np.linalg.inv(W2C)
         cam_centers.append(C2W[:3, 3:4])
     center, diagonal = get_center_and_diag(cam_centers)
@@ -169,22 +220,7 @@ def storePly(path, xyz, rgb):
     ply_data = PlyData([vertex_element])
     ply_data.write(path)
 
-def readColmapSceneInfo(path, eval, llffhold=8):
-    cam_infos = package_camera_params(path)
-
-    if eval:
-        cam_names = sorted([image_name for image_name in cam_infos.extr.image_name])
-        test_cam_names_set = {name for idx, name in enumerate(cam_names) if idx % llffhold == 0}
-    else:
-        test_cam_names_set = set()
-
-    train_cam_infos = []
-    test_cam_infos = []
-    for c in cam_infos:
-        if c.extr.image_name in test_cam_names_set:
-            test_cam_infos.append(c)
-        else:
-            train_cam_infos.append(c)
+def readColmapSceneInfo(path, train_cam_infos):
 
     nerf_normalization = getNerfppNorm(train_cam_infos)
 
@@ -200,8 +236,6 @@ def readColmapSceneInfo(path, eval, llffhold=8):
         pcd = None
 
     scene_info = SceneInfo(point_cloud=pcd,
-                           train_cameras=train_cam_infos,
-                           test_cameras=test_cam_infos,
                            nerf_normalization=nerf_normalization,
                            ply_path=ply_path)
     return scene_info
@@ -212,5 +246,11 @@ class NB():
 
 if __name__ == "__main__":
     MyNB = NB()
-    MyCamList = packageCamera("./data/Hub", MyNB)
+    MyPath = "./data/Hub"
+    # MyExtrs, MyImgNames = read_extrinsics_binary(MyPath)
+    # MyIntr = read_intrinsics_binary(MyPath)
+    # MyImageInfos =assemble_image_infos(MyImgNames, MyPath, MyNB)
+    # MyViewPoints = assemble_viewpoint(MyIntr, MyExtrs)
+    MyCamList = packageCameras("./data/Hub", MyNB)
+    MyTrainList, MyTestList = separateCameraToTrainTest(MyCamList, True)
     print("Done")

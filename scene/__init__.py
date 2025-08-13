@@ -1,7 +1,6 @@
 import os
 import random
-from scene.colmap_loader import readColmapSceneInfo
-from scene.camera_utils import cameraList_from_camInfos
+from scene.camera_loader import readColmapSceneInfo, separateCameraToTrainTest, packageCameras
 from scene.gaussian_model import GaussianModel
 from utils.arguments import ModelParams
 from utils.general_utils import searchForMaxIteration
@@ -11,7 +10,6 @@ class Scene:
     def __init__(self, model_params : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True):
         self.model_path = model_params.model_path
         self.loaded_iter = None
-
         if load_iteration:
             if load_iteration == -1:
                 self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"))
@@ -19,18 +17,14 @@ class Scene:
                 self.loaded_iter = load_iteration
             print("Loading trained model at iteration {}".format(self.loaded_iter))
 
-        if os.path.exists(os.path.join(model_params.source_path, "sparse")):
-            scene_info = readColmapSceneInfo(model_params.source_path, model_params.eval)
-        else:
-            assert False, "Wrong source path or Could not recognize scene type!"
+        cam_list = packageCameras(model_params.source_path, model_params)
+        self.train_cameras, self.test_cameras = separateCameraToTrainTest(cam_list, model_params.eval)
+        scene_info = readColmapSceneInfo(model_params.source_path, self.train_cameras)
+        self.cameras_extent = scene_info.nerf_normalization["radius"]
         
         if shuffle:
-            random.shuffle(scene_info.train_cameras)
-            random.shuffle(scene_info.test_cameras)
-        
-        self.cameras_extent = scene_info.nerf_normalization["radius"]
-        self.train_cameras = cameraList_from_camInfos(scene_info.train_cameras, model_params)
-        self.test_cameras = cameraList_from_camInfos(scene_info.test_cameras, model_params)
+            random.shuffle(self.train_cameras)
+            random.shuffle(self.test_cameras)
         
         self.gaussians = gaussians
         if self.loaded_iter:
@@ -42,8 +36,8 @@ class Scene:
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
         self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
         
-    def getTrainCameras(self, scale=1.0):
-        return self.train_cameras[scale]
+    def getTrainCameras(self):
+        return self.train_cameras
 
-    def getTestCameras(self, scale=1.0):
-        return self.test_cameras[scale]
+    def getTestCameras(self):
+        return self.test_cameras

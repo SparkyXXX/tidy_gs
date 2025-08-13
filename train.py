@@ -57,12 +57,9 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
         bg = torch.rand((3), device="cuda") if opt_params.random_background else background
         render_pkg = render(viewpoint_cam, gaussians, pipe_params, bg)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-        if viewpoint_cam.alpha_mask is not None:
-            alpha_mask = viewpoint_cam.alpha_mask.cuda()
-            image *= alpha_mask
 
         # Loss
-        gt_image = viewpoint_cam.original_image.cuda()
+        gt_image = viewpoint_cam.img.img_object_cuda.cuda()
         Ll1 = l1_loss(image, gt_image)
         ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
         loss = (1.0 - opt_params.lambda_dssim) * Ll1 + opt_params.lambda_dssim * (1.0 - ssim_value)
@@ -152,11 +149,11 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed,
                 psnr_test = 0.0
                 for idx, viewpoint in enumerate(config['cameras']):
                     image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *otherRenderArgs)["render"], 0.0, 1.0)
-                    gt_image = torch.clamp(viewpoint.original_image.cuda(), 0.0, 1.0)
+                    gt_image = torch.clamp(viewpoint.img.img_object_cuda.cuda(), 0.0, 1.0)
                     if idx < 5:
-                        tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
+                        tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.img.img_name), image[None], global_step=iteration)
                         if iteration == testing_iterations[0]:
-                            tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
+                            tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.img.img_name), gt_image[None], global_step=iteration)
                     l1_test += l1_loss(image, gt_image).mean().double()
                     psnr_test += psnr(image, gt_image).mean().double()
                 psnr_test /= len(config['cameras'])

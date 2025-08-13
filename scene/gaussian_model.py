@@ -3,7 +3,7 @@ import torch
 import numpy as np
 from torch import nn
 from plyfile import PlyData, PlyElement
-from scene.colmap_loader import BasicPointCloud
+from scene.camera_loader import BasicPointCloud
 from utils.general_utils import mkdir_p, inverse_sigmoid, strip_symmetric, get_expon_lr_func
 from utils.graphics_utils import build_scaling_rotation, build_rotation, RGB2SH
 from diff_gaussian_rasterization import SparseGaussianAdam
