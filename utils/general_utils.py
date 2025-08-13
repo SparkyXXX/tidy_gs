@@ -1,11 +1,16 @@
 import os
 import sys
-import random
 import torch
+import random
+import struct
 import numpy as np
 from os import makedirs, path
 from errno import EEXIST
 from datetime import datetime
+
+def read_next_bytes(fid, num_bytes, format_char_sequence, endian_character="<"):
+    data = fid.read(num_bytes)
+    return struct.unpack(endian_character + format_char_sequence, data)
 
 def searchForMaxIteration(folder):
     saved_iters = [int(fname.split("_")[-1]) for fname in os.listdir(folder)]

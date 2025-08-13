@@ -40,6 +40,7 @@ python metrics.py -m ./data/Hub/output ./data/another_scene/output # 批量计�
 ```shell
 python train.py -s data/Hub -m data/Hub/output --iterations 100 --optimizer_type sparse_adam
 python train.py -s data/Hub -m data/Hub/output --iterations 10000 --optimizer_type sparse_adam --test_iterations 3000 6000 10000 --save_iterations 3000 6000 10000 --eval
+python train.py -s data/Hub -m data/Hub/output --iterations 30000 --optimizer_type sparse_adam --test_iterations 10000 20000 30000 --save_iterations 30000 --eval
 
 python choose_camera.py --small_ply ./data/Garden/output/point_cloud/small_pcd.ply --big_ply ./data/Garden/output/point_cloud/big_pcd.ply --threshold 0.6 --source_path ./data/Garden
 ```

@@ -1,24 +1,21 @@
 import os
-import struct
 import torch
 import collections
 import numpy as np
 from torch import nn
 from PIL import Image
-from typing import NamedTuple
-from plyfile import PlyData, PlyElement
+from utils.general_utils import PILtoTorch, read_next_bytes
 from utils.graphics_utils import focal2fov, qvec2rotmat, getWorld2View, getProjectionMatrix
-from utils.general_utils import PILtoTorch
 
 Intrinsics = collections.namedtuple("Intrinsics", ["fx", "fy", "cx", "cy", "width", "height"])
 Extrinsics = collections.namedtuple("Extrinsics", ["qvec_w2c", "tvec_w2c"])
-Viewpoint = collections.namedtuple("Viewpoint", ["fovx", "fovy", "w2c_np", "w2c_cuda", "proj_cuda", "whole_transform_cuda", "cam_center_cuda"])
+Viewpoints = collections.namedtuple("Viewpoints", ["fovx", "fovy", "w2c_np", "w2c_cuda", "proj_cuda", "whole_transform_cuda", "cam_center_cuda"])
 ImageInfos = collections.namedtuple("ImageInfos", ["img_name", "img_width", "img_height", "img_object_pil", "origin_img_cuda"])
 
 class Camera(nn.Module):
     intr: Intrinsics
     extr: Extrinsics
-    view: Viewpoint
+    view: Viewpoints
     img: ImageInfos
     def __init__(self, intr, extr, view, img):
         super(Camera, self).__init__()
@@ -27,40 +24,7 @@ class Camera(nn.Module):
         self.view = view
         self.img = img
 
-class BasicPointCloud(NamedTuple):
-    points : np.array
-    normals : np.array
-    colors : np.array
-
-class SceneInfo(NamedTuple):
-    ply_path: str
-    point_cloud: BasicPointCloud
-    nerf_normalization: dict
-
-def read_next_bytes(fid, num_bytes, format_char_sequence, endian_character="<"):
-    data = fid.read(num_bytes)
-    return struct.unpack(endian_character + format_char_sequence, data)
-
-def read_points3D_binary(path_to_model_file):
-    with open(path_to_model_file, "rb") as fid:
-        num_points = read_next_bytes(fid, 8, "Q")[0]
-        xyzs = np.empty((num_points, 3))
-        rgbs = np.empty((num_points, 3))
-
-        for p_id in range(num_points):
-            binary_point_line_properties = read_next_bytes(fid, num_bytes=43, format_char_sequence="QdddBBBd")
-            xyz = np.array(binary_point_line_properties[1:4])
-            rgb = np.array(binary_point_line_properties[4:7])
-            track_length_useless = read_next_bytes(
-                fid, num_bytes=8, format_char_sequence="Q")[0]
-            track_elems_useless = read_next_bytes(
-                fid, num_bytes=8*track_length_useless,
-                format_char_sequence="ii"*track_length_useless)
-            xyzs[p_id] = xyz
-            rgbs[p_id] = rgb
-    return xyzs, rgbs
-
-def read_intrinsics_binary(path):
+def assemble_intrinsics(path):
     num_params = 4
     with open(os.path.join(path, "sparse/0/cameras.bin"), "rb") as fid:
         num_cameras_useless = read_next_bytes(fid, 8, "Q")[0]
@@ -73,7 +37,7 @@ def read_intrinsics_binary(path):
         intrinsics_tuple = Intrinsics(fx=intrinsics[0], fy=intrinsics[1], cx=intrinsics[2], cy=intrinsics[3], width=width, height=height);
     return intrinsics_tuple
 
-def read_extrinsics_binary(path):
+def assemble_extrinsics(path):
     extrinsics_dict = {}
     image_names_dict = {}
     with open(os.path.join(path, "sparse/0/images.bin"), "rb") as fid:
@@ -97,7 +61,7 @@ def read_extrinsics_binary(path):
             image_names_dict[image_idx] = image_name
     return extrinsics_dict, image_names_dict
 
-def assemble_viewpoint(intr, extrs):
+def assemble_viewpoints(intr, extrs):
     viewpoints_dict = {}
     
     zfar = 100.0
@@ -115,16 +79,16 @@ def assemble_viewpoint(intr, extrs):
         cam_center_cuda = w2c_cuda.inverse()[3, :3]
         whole_transform_cuda = (w2c_cuda.unsqueeze(0).bmm(proj_cuda.unsqueeze(0))).squeeze(0)
 
-        viewpoint = Viewpoint(fovx=fovx, fovy=fovy, w2c_np=w2c_np, w2c_cuda=w2c_cuda, proj_cuda=proj_cuda, 
+        viewpoint = Viewpoints(fovx=fovx, fovy=fovy, w2c_np=w2c_np, w2c_cuda=w2c_cuda, proj_cuda=proj_cuda, 
                               whole_transform_cuda=whole_transform_cuda, cam_center_cuda=cam_center_cuda)
         viewpoints_dict[key] = viewpoint
     return viewpoints_dict
 
-def assemble_image_infos(image_names_dict, path, model_params):
+def assemble_image_infos(image_names_dict, model_params):
     image_infos_dict = {}
     for idx in range(len(image_names_dict)):
         img_name = image_names_dict[idx+1]
-        img_object_pil = Image.open(os.path.join(path, "images", img_name))
+        img_object_pil = Image.open(os.path.join(model_params.source_path, "images", img_name))
         orig_w, orig_h = img_object_pil.size
         if model_params.resolution_scale == -1:
             resolution_scale = (orig_w / 1600) if (orig_w > 1600) else 1
@@ -143,11 +107,11 @@ def assemble_image_infos(image_names_dict, path, model_params):
         image_infos_dict[idx+1] = image_infos
     return image_infos_dict
 
-def packageCameras(path, model_params):
-    intr  = read_intrinsics_binary(path)
-    extrs, img_names = read_extrinsics_binary(path)
-    views = assemble_viewpoint(intr, extrs)
-    imgs = assemble_image_infos(img_names, path, model_params)
+def packageCameras(model_params):
+    intr  = assemble_intrinsics(model_params.source_path)
+    extrs, img_names = assemble_extrinsics(model_params.source_path)
+    views = assemble_viewpoints(intr, extrs)
+    imgs = assemble_image_infos(img_names, model_params)
 
     cam_list = []
     for key in extrs:
@@ -158,7 +122,7 @@ def packageCameras(path, model_params):
         cam_list.append(cam)
     return cam_list
 
-def separateCameraToTrainTest(cam_list, eval, llffhold=8):
+def separateCamerasToTrainTest(cam_list, eval, llffhold=8):
     if eval:
         img_names = sorted([cam.img.img_name for cam in cam_list])
         test_img_names = {name for idx, name in enumerate(img_names) if idx % llffhold == 0}
@@ -173,63 +137,3 @@ def separateCameraToTrainTest(cam_list, eval, llffhold=8):
         else:
             train_cam_list.append(cam)
     return train_cam_list, test_cam_list
-
-def getNerfppNorm(cam_infos):
-    def get_center_and_diag(cam_centers):
-        cam_centers = np.hstack(cam_centers)
-        avg_cam_center = np.mean(cam_centers, axis=1, keepdims=True)
-        center = avg_cam_center
-        dist = np.linalg.norm(cam_centers - center, axis=0, keepdims=True)
-        diagonal = np.max(dist)
-        return center.flatten(), diagonal
-
-    cam_centers = []
-    for cam in cam_infos:
-        W2C = cam.view.w2c_np
-        C2W = np.linalg.inv(W2C)
-        cam_centers.append(C2W[:3, 3:4])
-    center, diagonal = get_center_and_diag(cam_centers)
-    translate = -center
-    radius = diagonal * 1.1
-    return {"translate": translate, "radius": radius}
-
-def fetchPly(path):
-    plydata = PlyData.read(path)
-    vertices = plydata['vertex']
-    positions = np.vstack([vertices['x'], vertices['y'], vertices['z']]).T
-    colors = np.vstack([vertices['red'], vertices['green'], vertices['blue']]).T / 255.0
-    normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
-    return BasicPointCloud(points=positions, colors=colors, normals=normals)
-
-def storePly(path, xyz, rgb):
-    dtype = [('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
-            ('nx', 'f4'), ('ny', 'f4'), ('nz', 'f4'),
-            ('red', 'u1'), ('green', 'u1'), ('blue', 'u1')]
-    
-    normals = np.zeros_like(xyz)
-    attributes = np.concatenate((xyz, normals, rgb), axis=1)
-    elements = np.empty(xyz.shape[0], dtype=dtype)
-    elements[:] = list(map(tuple, attributes))
-    vertex_element = PlyElement.describe(elements, 'vertex')
-    ply_data = PlyData([vertex_element])
-    ply_data.write(path)
-
-def readColmapSceneInfo(path, train_cam_infos):
-
-    nerf_normalization = getNerfppNorm(train_cam_infos)
-
-    ply_path = os.path.join(path, "sparse/0/points3D.ply")
-    bin_path = os.path.join(path, "sparse/0/points3D.bin")
-    if not os.path.exists(ply_path):
-        print("Converting point3d.bin to .ply, will happen only the first time you open the scene.")
-        xyz, rgb = read_points3D_binary(bin_path)
-        storePly(ply_path, xyz, rgb)
-    try:
-        pcd = fetchPly(ply_path)
-    except:
-        pcd = None
-
-    scene_info = SceneInfo(point_cloud=pcd,
-                           nerf_normalization=nerf_normalization,
-                           ply_path=ply_path)
-    return scene_info
