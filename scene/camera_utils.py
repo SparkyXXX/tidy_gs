@@ -33,6 +33,7 @@ class Camera(nn.Module):
         self.znear = 0.01
         self.trans = trans
         self.scale = scale
+        # TODO: 这里的转置，是不是因为CUDA中是列主序？
         self.world_view_transform = torch.tensor(getWorld2View(R, T, trans, scale)).transpose(0, 1).cuda()
         temp_projection_matrix = getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.FoVx, fovY=self.FoVy).transpose(0,1).cuda()
         self.projection_matrix = (self.world_view_transform.unsqueeze(0).bmm(temp_projection_matrix.unsqueeze(0))).squeeze(0)

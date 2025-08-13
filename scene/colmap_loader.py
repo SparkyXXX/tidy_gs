@@ -12,15 +12,15 @@ class BasicPointCloud(NamedTuple):
     colors : np.array
 
 Intrinsics = collections.namedtuple("Intrinsics", ["fx", "fy", "cx", "cy", "width", "height"])
-Extrinsics = collections.namedtuple("Extrinsics", ["qvec", "tvec", "image_name"])
+Extrinsics = collections.namedtuple("Extrinsics", ["qvec_w2c", "tvec_w2c", "image_name"])
 
 class CameraParam(NamedTuple):
-    intr: Intrinsics
-    extr: Extrinsics
+    intrinsics_tuple: Intrinsics
+    extrinsics_dict: Extrinsics
     fovx: float
     fovy: float
-    R: np.array
-    T: np.array
+    R_w2c: np.array
+    T_w2c: np.array
 
 class SceneInfo(NamedTuple):
     ply_path: str
@@ -77,6 +77,7 @@ def read_points3D_binary(path_to_model_file):
             rgbs[p_id] = rgb
     return xyzs, rgbs
 
+
 def read_intrinsics_binary(path_to_model_file):
     num_params = 4
     with open(path_to_model_file, "rb") as fid:
@@ -87,17 +88,18 @@ def read_intrinsics_binary(path_to_model_file):
         width = camera_properties_useless[2]
         height = camera_properties_useless[3]
         intrinsics = np.array(read_next_bytes(fid, num_bytes=8*num_params, format_char_sequence="d"*num_params))
-    return Intrinsics(fx=intrinsics[0], fy=intrinsics[1], cx=intrinsics[2], cy=intrinsics[3], width=width, height=height)
+        intrinsics_tuple = Intrinsics(fx=intrinsics[0], fy=intrinsics[1], cx=intrinsics[2], cy=intrinsics[3], width=width, height=height);
+    return intrinsics_tuple
 
 def read_extrinsics_binary(path_to_model_file):
-    extrinsics = {}
+    extrinsics_dict = {}
     with open(path_to_model_file, "rb") as fid:
         num_reg_images = read_next_bytes(fid, 8, "Q")[0]
         for _ in range(num_reg_images):
             binary_image_properties = read_next_bytes(fid, num_bytes=64, format_char_sequence="idddddddi")
             image_idx = binary_image_properties[0]
-            qvec = np.array(binary_image_properties[1:5])
-            tvec = np.array(binary_image_properties[5:8])
+            qvec_w2c = np.array(binary_image_properties[1:5])
+            tvec_w2c = np.array(binary_image_properties[5:8])
             camera_id_useless = binary_image_properties[8]
             image_name = ""
             current_char = read_next_bytes(fid, 1, "c")[0]
@@ -108,8 +110,8 @@ def read_extrinsics_binary(path_to_model_file):
             x_y_id_s_useless = read_next_bytes(fid, num_bytes=24*num_points2D_useless, format_char_sequence="ddq"*num_points2D_useless)
             xys_useless = np.column_stack([tuple(map(float, x_y_id_s_useless[0::3])), tuple(map(float, x_y_id_s_useless[1::3]))])
             point3D_ids_useless = np.array(tuple(map(int, x_y_id_s_useless[2::3])))
-            extrinsics[image_idx] = Extrinsics(qvec=qvec, tvec=tvec, image_name=image_name)
-    return extrinsics
+            extrinsics_dict[image_idx] = Extrinsics(qvec_w2c=qvec_w2c, tvec_w2c=tvec_w2c, image_name=image_name)
+    return extrinsics_dict
 
 def getNerfppNorm(cam_info):
     def get_center_and_diag(cam_centers):
