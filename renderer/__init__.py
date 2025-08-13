@@ -1,6 +1,6 @@
 import math
 import torch
-from scene.gaussian_model import GaussianModel
+from loader.gaussian_model import GaussianModel
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 
 def render(viewpoint_camera, gaussian : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0):

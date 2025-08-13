@@ -5,9 +5,9 @@ from tqdm import tqdm
 from os import makedirs
 from argparse import ArgumentParser
 from setproctitle import setproctitle
-from scene import Scene, GaussianModel
+from loader import packageAllData
 from renderer import render
-from utils.general_utils import safe_state
+from utils.general_utils import safe_state, searchForMaxIteration
 from utils.arguments import ModelParams, PipelineParams, get_combined_args
 
 def render_set(model_path, name, iteration, views, gaussians, pipeline, background):
@@ -24,14 +24,18 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
 
 def render_sets(model_params : ModelParams, pipeline : PipelineParams, iteration : int, skip_train : bool, skip_test : bool):
     with torch.no_grad():
-        gaussians = GaussianModel(model_params.sh_degree, optimizer_type="sparse_adam")
-        scene = Scene(model_params, gaussians, load_iteration=iteration, shuffle=False)
+        whole = packageAllData(model_params, load_iteration=iteration, shuffle=False)
         bg_color = [1,1,1] if model_params.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+        loaded_iter = None
+        if iteration == -1:
+            loaded_iter = searchForMaxIteration(os.path.join(model_params.model_path, "point_cloud"))
+        else:
+            loaded_iter = iteration
         if not skip_train:
-             render_set(model_params.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background)
+             render_set(model_params.model_path, "train", loaded_iter, whole.train_cam_list, whole.gaussians, pipeline, background)
         if not skip_test:
-             render_set(model_params.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background)
+             render_set(model_params.model_path, "test", loaded_iter, whole.test_cam_list, whole.gaussians, pipeline, background)
 
 if __name__ == "__main__":
     setproctitle("Ruixiang's Work 😆")
