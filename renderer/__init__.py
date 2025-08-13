@@ -21,7 +21,7 @@ def render(viewpoint_camera, gaussian : GaussianModel, pipe, bg_color : torch.Te
         bg=bg_color,
         scale_modifier=scaling_modifier,
         viewmatrix=viewpoint_camera.view.w2c_cuda,
-        projmatrix=viewpoint_camera.view.proj_cuda,
+        projmatrix=viewpoint_camera.view.whole_transform_cuda,
         sh_degree=gaussian.active_sh_degree,
         campos=viewpoint_camera.view.cam_center_cuda,
         prefiltered=False,

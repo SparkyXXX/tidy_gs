@@ -74,7 +74,7 @@ def evaluate(model_paths):
 
 if __name__ == "__main__":
     setproctitle("Ruixiang's Work 😆")
-    os.environ["CUDA_VISIBLE_DEVICES"] = "6"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     parser = ArgumentParser(description="Training script parameters")
     parser.add_argument('--model_paths', '-m', required=True, nargs="+", type=str, default=[])
     args = parser.parse_args()

@@ -7,17 +7,13 @@ from torch import nn
 from PIL import Image
 from typing import NamedTuple
 from plyfile import PlyData, PlyElement
-
-import sys
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(project_root)
 from utils.graphics_utils import focal2fov, qvec2rotmat, getWorld2View, getProjectionMatrix
 from utils.general_utils import PILtoTorch
 
 Intrinsics = collections.namedtuple("Intrinsics", ["fx", "fy", "cx", "cy", "width", "height"])
 Extrinsics = collections.namedtuple("Extrinsics", ["qvec_w2c", "tvec_w2c"])
 Viewpoint = collections.namedtuple("Viewpoint", ["fovx", "fovy", "w2c_np", "w2c_cuda", "proj_cuda", "whole_transform_cuda", "cam_center_cuda"])
-ImageInfos = collections.namedtuple("ImageInfos", ["img_name", "img_width", "img_height", "img_object_pil", "img_object_cuda"])
+ImageInfos = collections.namedtuple("ImageInfos", ["img_name", "img_width", "img_height", "img_object_pil", "origin_img_cuda"])
 
 class Camera(nn.Module):
     intr: Intrinsics
@@ -39,8 +35,6 @@ class BasicPointCloud(NamedTuple):
 class SceneInfo(NamedTuple):
     ply_path: str
     point_cloud: BasicPointCloud
-    # train_cameras: list
-    # test_cameras: list
     nerf_normalization: dict
 
 def read_next_bytes(fid, num_bytes, format_char_sequence, endian_character="<"):
@@ -140,12 +134,12 @@ def assemble_image_infos(image_names_dict, path, model_params):
 
         resized_img_object_torch = PILtoTorch(img_object_pil, resolution)
         gt_img_torch = resized_img_object_torch[:3, ...]
-        img_object_cuda = gt_img_torch.clamp(0.0, 1.0).cuda()
-        img_width = img_object_cuda.shape[2]
-        img_height = img_object_cuda.shape[1]
+        origin_img_cuda = gt_img_torch.clamp(0.0, 1.0).cuda()
+        img_width = origin_img_cuda.shape[2]
+        img_height = origin_img_cuda.shape[1]
 
         image_infos = ImageInfos(img_name=img_name, img_width=img_width, img_height=img_height,
-                                 img_object_pil=img_object_pil, img_object_cuda=img_object_cuda)
+                                 img_object_pil=img_object_pil, origin_img_cuda=origin_img_cuda)
         image_infos_dict[idx+1] = image_infos
     return image_infos_dict
 
@@ -239,18 +233,3 @@ def readColmapSceneInfo(path, train_cam_infos):
                            nerf_normalization=nerf_normalization,
                            ply_path=ply_path)
     return scene_info
-
-class NB(): 
-    def __init__(self):
-        self.resolution_scale = -1
-
-if __name__ == "__main__":
-    MyNB = NB()
-    MyPath = "./data/Hub"
-    # MyExtrs, MyImgNames = read_extrinsics_binary(MyPath)
-    # MyIntr = read_intrinsics_binary(MyPath)
-    # MyImageInfos =assemble_image_infos(MyImgNames, MyPath, MyNB)
-    # MyViewPoints = assemble_viewpoint(MyIntr, MyExtrs)
-    MyCamList = packageCameras("./data/Hub", MyNB)
-    MyTrainList, MyTestList = separateCameraToTrainTest(MyCamList, True)
-    print("Done")
