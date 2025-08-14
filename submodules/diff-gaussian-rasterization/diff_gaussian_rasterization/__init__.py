@@ -89,13 +89,13 @@ class _RasterizeGaussians(torch.autograd.Function):
         if raster_settings.debug:
             cpu_args = cpu_deep_copy_tuple(args) # Copy them before they can be corrupted
             try:
-                num_rendered, num_buckets, color, invdepths, radii, geomBuffer, binningBuffer, imgBuffer, sampleBuffer = _C.rasterize_gaussians(*args)
+                num_rendered, num_buckets, color, invdepths, radii, geomBuffer, binningBuffer, imgBuffer, sampleBuffer = _C.rasterize_gaussians_forward(*args)
             except Exception as ex:
                 torch.save(cpu_args, "snapshot_fw.dump")
                 print("\nAn error occured in forward. Please forward snapshot_fw.dump for debugging.")
                 raise ex
         else:
-            num_rendered, num_buckets, color, invdepths, radii, geomBuffer, binningBuffer, imgBuffer, sampleBuffer = _C.rasterize_gaussians(*args)
+            num_rendered, num_buckets, color, invdepths, radii, geomBuffer, binningBuffer, imgBuffer, sampleBuffer = _C.rasterize_gaussians_forward(*args)
 
         # Keep relevant tensors for backward
         ctx.raster_settings = raster_settings
@@ -193,7 +193,7 @@ class GaussianRasterizer(nn.Module):
         # Mark visible points (based on frustum culling for camera) with a boolean 
         with torch.no_grad():
             raster_settings = self.raster_settings
-            visible = _C.mark_visible(
+            visible = _C.markVisible(
                 positions,
                 raster_settings.viewmatrix,
                 raster_settings.projmatrix)

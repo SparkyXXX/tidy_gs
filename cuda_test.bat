@@ -37,5 +37,6 @@ cd "%ORIGINAL_DIR%"
 
 echo Running render script...
 python render.py -m ./data/Hub/output --skip_train
+python metrics.py -m ./data/Hub/output
 
 echo Operation completed
