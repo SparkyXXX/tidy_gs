@@ -1,7 +1,7 @@
 import math
 import torch
 from loader.gaussian_model import GaussianModel
-from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
+from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer # type: ignore
 
 def render(viewpoint_camera, gaussian : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0):
     # Render the scene. Background tensor (bg_color) must be on GPU!
