@@ -66,6 +66,16 @@ __device__ glm::vec3 computeColorFromSH(int idx, int deg, int max_coeffs, const 
 		}
 	}
 	result += 0.5f;
+	// if (idx == 0)
+	// {
+	// 	printf("pos: %f %f %f dir: %f %f %f color: %f %f %f\n", pos.x, pos.y, pos.z, dir.x, dir.y, dir.z, result.x, result.y, result.z);
+	// 	printf("idx: %d max_coeff: %d\n", idx, max_coeffs);
+	// 	printf("dc: %f %f %f\n", direct_color[0].x, direct_color[0].y, direct_color[0].z);
+	// 	for (int i = 0; i < max_coeffs; ++i)
+	// 	{
+	// 		printf("sh[%d]: %f %f %f\n", i, sh[i].x, sh[i].y, sh[i].z);
+	// 	}
+	// }
 
 	// RGB colors are clamped to positive values. If values are
 	// clamped, we need to keep track of this for the backward pass.

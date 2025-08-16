@@ -122,8 +122,7 @@ def packageCameras(model_params):
         cam_list.append(cam)
     return cam_list
 
-# hrx: set llffhold to 100 temporarily!!!
-def separateCamerasToTrainTest(cam_list, eval, llffhold=100):
+def separateCamerasToTrainTest(cam_list, eval, llffhold=8):
     if eval:
         img_names = sorted([cam.img.img_name for cam in cam_list])
         test_img_names = {name for idx, name in enumerate(img_names) if idx % llffhold == 0}

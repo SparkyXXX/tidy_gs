@@ -1154,7 +1154,7 @@ __global__ void fusedssim_backwardCUDA(
 }
 
 torch::Tensor
-fusedssim_forward(
+fusedssim(
     float C1,
     float C2,
     torch::Tensor &img1,

@@ -16,7 +16,7 @@
 #include <string>
 
 std::tuple<int, int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
-RasterizeGaussiansForwardCUDA(
+RasterizeGaussiansCUDA(
 	const torch::Tensor &background,
 	const torch::Tensor &means3D,
 	const torch::Tensor &colors,
@@ -88,7 +88,7 @@ void adamUpdate(
 	const uint32_t M);
 
 torch::Tensor
-fusedssim_forward(
+fusedssim(
 	float C1,
 	float C2,
 	torch::Tensor &img1,
