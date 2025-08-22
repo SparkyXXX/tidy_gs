@@ -1,15 +1,7 @@
-/*
- * Copyright (C) 2023, Inria
- * GRAPHDECO research group, https://team.inria.fr/graphdeco
- * All rights reserved.
- *
- * This software is free for non-commercial, research and evaluation use
- * under the terms of the LICENSE.md file.
- *
- * For inquiries contact  george.drettakis@inria.fr
- */
-
-#include "rasterizer_impl.h"
+#include "auxiliary.cuh"
+#include "forward.cuh"
+#include "backward.cuh"
+#include "rasterizer_impl.cuh"
 #include <iostream>
 #include <fstream>
 #include <algorithm>
@@ -26,315 +18,6 @@
 #include <cooperative_groups/reduce.h>
 namespace cg = cooperative_groups;
 
-#include "auxiliary.h"
-#include "forward.h"
-#include "backward.h"
-
-// Helper function to find the next-highest bit of the MSB
-// on the CPU.
-uint32_t getHigherMsb(uint32_t n)
-{
-	uint32_t msb = sizeof(n) * 4;
-	uint32_t step = msb;
-	while (step > 1)
-	{
-		step /= 2;
-		if (n >> msb)
-			msb += step;
-		else
-			msb -= step;
-	}
-	if (n >> msb)
-		msb++;
-	return msb;
-}
-
-__device__ inline float evaluate_opacity_factor(const float dx, const float dy, const float4 co)
-{
-	return 0.5f * (co.x * dx * dx + co.z * dy * dy) + co.y * dx * dy;
-}
-
-template <uint32_t PATCH_WIDTH, uint32_t PATCH_HEIGHT>
-__device__ inline float max_contrib_power_rect_gaussian_float(
-	const float4 co,
-	const float2 mean,
-	const glm::vec2 rect_min,
-	const glm::vec2 rect_max,
-	glm::vec2 &max_pos)
-{
-	const float x_min_diff = rect_min.x - mean.x;
-	const float x_left = x_min_diff > 0.0f;
-	// const float x_left = mean.x < rect_min.x;
-	const float not_in_x_range = x_left + (mean.x > rect_max.x);
-
-	const float y_min_diff = rect_min.y - mean.y;
-	const float y_above = y_min_diff > 0.0f;
-	// const float y_above = mean.y < rect_min.y;
-	const float not_in_y_range = y_above + (mean.y > rect_max.y);
-
-	max_pos = {mean.x, mean.y};
-	float max_contrib_power = 0.0f;
-
-	if ((not_in_y_range + not_in_x_range) > 0.0f)
-	{
-		const float px = x_left * rect_min.x + (1.0f - x_left) * rect_max.x;
-		const float py = y_above * rect_min.y + (1.0f - y_above) * rect_max.y;
-
-		const float dx = copysign(float(PATCH_WIDTH), x_min_diff);
-		const float dy = copysign(float(PATCH_HEIGHT), y_min_diff);
-
-		const float diffx = mean.x - px;
-		const float diffy = mean.y - py;
-
-		const float rcp_dxdxcox = __frcp_rn(PATCH_WIDTH * PATCH_WIDTH * co.x);	 // = 1.0 / (dx*dx*co.x)
-		const float rcp_dydycoz = __frcp_rn(PATCH_HEIGHT * PATCH_HEIGHT * co.z); // = 1.0 / (dy*dy*co.z)
-
-		const float tx = not_in_y_range * __saturatef((dx * co.x * diffx + dx * co.y * diffy) * rcp_dxdxcox);
-		const float ty = not_in_x_range * __saturatef((dy * co.y * diffx + dy * co.z * diffy) * rcp_dydycoz);
-		max_pos = {px + tx * dx, py + ty * dy};
-
-		const float2 max_pos_diff = {mean.x - max_pos.x, mean.y - max_pos.y};
-		max_contrib_power = evaluate_opacity_factor(max_pos_diff.x, max_pos_diff.y, co);
-	}
-
-	return max_contrib_power;
-}
-
-// Wrapper method to call auxiliary coarse frustum containment test.
-// Mark all Gaussians that pass it.
-__global__ void checkFrustum(int P,
-							 const float *orig_points,
-							 const float *viewmatrix,
-							 const float *projmatrix,
-							 bool *present)
-{
-	auto idx = cg::this_grid().thread_rank();
-	if (idx >= P)
-		return;
-
-	float3 p_view;
-	present[idx] = in_frustum(idx, orig_points, viewmatrix, projmatrix, false, p_view);
-}
-
-// Generates one key/value pair for all Gaussian / tile overlaps.
-// Run once per Gaussian (1:N mapping).
-__global__ void duplicateWithKeys(
-	int P,
-	const float2 *points_xy,
-	const float4 *__restrict__ conic_opacity,
-	const float *depths,
-	const uint32_t *offsets,
-	uint64_t *gaussian_keys_unsorted,
-	uint32_t *gaussian_values_unsorted,
-	int *radii,
-	dim3 grid,
-	int2 *rects)
-{
-	auto idx = cg::this_grid().thread_rank();
-	if (idx >= P)
-		return;
-
-	// Generate no key/value pair for invisible Gaussians
-	if (radii[idx] > 0)
-	{
-		// Find this Gaussian's offset in buffer for writing keys/values.
-		uint32_t off = (idx == 0) ? 0 : offsets[idx - 1];
-		const uint32_t offset_to = offsets[idx];
-		uint2 rect_min, rect_max;
-
-		if (rects == nullptr)
-			getRect(points_xy[idx], radii[idx], rect_min, rect_max, grid);
-		else
-			getRect(points_xy[idx], rects[idx], rect_min, rect_max, grid);
-
-		const float2 xy = points_xy[idx];
-		const float4 co = conic_opacity[idx];
-		const float opacity_threshold = 1.0f / 255.0f;
-		const float opacity_factor_threshold = logf(co.w / opacity_threshold);
-
-		// For each tile that the bounding rect overlaps, emit a
-		// key/value pair. The key is |  tile ID  |      depth      |,
-		// and the value is the ID of the Gaussian. Sorting the values
-		// with this key yields Gaussian IDs in a list, such that they
-		// are first sorted by tile and then by depth.
-		for (int y = rect_min.y; y < rect_max.y; y++)
-		{
-			for (int x = rect_min.x; x < rect_max.x; x++)
-			{
-				const glm::vec2 tile_min(x * BLOCK_X, y * BLOCK_Y);
-				const glm::vec2 tile_max((x + 1) * BLOCK_X - 1, (y + 1) * BLOCK_Y - 1);
-
-				glm::vec2 max_pos;
-				float max_opac_factor = 0.0f;
-				max_opac_factor = max_contrib_power_rect_gaussian_float<BLOCK_X - 1, BLOCK_Y - 1>(co, xy, tile_min, tile_max, max_pos);
-
-				uint64_t key = y * grid.x + x;
-				key <<= 32;
-				key |= *((uint32_t *)&depths[idx]);
-				if (max_opac_factor <= opacity_factor_threshold)
-				{
-					gaussian_keys_unsorted[off] = key;
-					gaussian_values_unsorted[off] = idx;
-					off++;
-				}
-			}
-		}
-
-		for (; off < offset_to; ++off)
-		{
-			uint64_t key = (uint32_t)-1;
-			key <<= 32;
-			const float depth = FLT_MAX;
-			key |= *((uint32_t *)&depth);
-			gaussian_values_unsorted[off] = static_cast<uint32_t>(-1);
-			gaussian_keys_unsorted[off] = key;
-		}
-	}
-}
-
-// Check keys to see if it is at the start/end of one tile's range in
-// the full sorted list. If yes, write start/end of this tile.
-// Run once per instanced (duplicated) Gaussian ID.
-__global__ void identifyTileRanges(int L, uint64_t *point_list_keys, uint2 *ranges)
-{
-	auto idx = cg::this_grid().thread_rank();
-	if (idx >= L)
-		return;
-
-	// Read tile ID from key. Update start/end of tile range if at limit.
-	uint64_t key = point_list_keys[idx];
-	uint32_t currtile = key >> 32;
-	bool valid_tile = currtile != (uint32_t)-1;
-
-	if (idx == 0)
-		ranges[currtile].x = 0;
-	else
-	{
-		uint32_t prevtile = point_list_keys[idx - 1] >> 32;
-		if (currtile != prevtile)
-		{
-			ranges[prevtile].y = idx;
-			if (valid_tile)
-				ranges[currtile].x = idx;
-		}
-	}
-	if (idx == L - 1 && valid_tile)
-		ranges[currtile].y = L;
-}
-
-// for each tile, see how many buckets/warps are needed to store the state
-__global__ void perTileBucketCount(int T, uint2 *ranges, uint32_t *bucketCount)
-{
-	auto idx = cg::this_grid().thread_rank();
-	if (idx >= T)
-		return;
-
-	uint2 range = ranges[idx];
-	int num_splats = range.y - range.x;
-	int num_buckets = (num_splats + 31) / 32;
-	bucketCount[idx] = (uint32_t)num_buckets;
-}
-
-// Mark Gaussians as visible/invisible, based on view frustum testing
-void CudaRasterizer::Rasterizer::markVisible(
-	int P,
-	float *means3D,
-	float *viewmatrix,
-	float *projmatrix,
-	bool *present)
-{
-	checkFrustum<<<(P + 255) / 256, 256>>>(
-		P,
-		means3D,
-		viewmatrix, projmatrix,
-		present);
-}
-
-CudaRasterizer::GeometryState CudaRasterizer::GeometryState::fromChunk(char *&chunk, size_t P)
-{
-	GeometryState geom;
-	obtain(chunk, geom.depths, P, 128);
-	obtain(chunk, geom.clamped, P * 3, 128);
-	obtain(chunk, geom.internal_radii, P, 128);
-	obtain(chunk, geom.means2D, P, 128);
-	obtain(chunk, geom.cov3D, P * 6, 128);
-	obtain(chunk, geom.conic_opacity, P, 128);
-	obtain(chunk, geom.rgb, P * 3, 128);
-	obtain(chunk, geom.tiles_touched, P, 128);
-	cub::DeviceScan::InclusiveSum(nullptr, geom.scan_size, geom.tiles_touched, geom.tiles_touched, P);
-	obtain(chunk, geom.scanning_space, geom.scan_size, 128);
-	obtain(chunk, geom.point_offsets, P, 128);
-	return geom;
-}
-
-CudaRasterizer::ImageState CudaRasterizer::ImageState::fromChunk(char *&chunk, size_t N)
-{
-	ImageState img;
-	obtain(chunk, img.accum_alpha, N, 128);
-	obtain(chunk, img.n_contrib, N, 128);
-	obtain(chunk, img.ranges, N, 128);
-	int *dummy = nullptr;
-	int *wummy = nullptr;
-	cub::DeviceScan::InclusiveSum(nullptr, img.scan_size, dummy, wummy, N);
-	obtain(chunk, img.contrib_scan, img.scan_size, 128);
-
-	obtain(chunk, img.max_contrib, N, 128);
-	obtain(chunk, img.pixel_colors, N * NUM_CHANNELS_3DGS, 128);
-	obtain(chunk, img.pixel_invDepths, N, 128);
-	obtain(chunk, img.bucket_count, N, 128);
-	obtain(chunk, img.bucket_offsets, N, 128);
-	cub::DeviceScan::InclusiveSum(nullptr, img.bucket_count_scan_size, img.bucket_count, img.bucket_count, N);
-	obtain(chunk, img.bucket_count_scanning_space, img.bucket_count_scan_size, 128);
-
-	return img;
-}
-
-CudaRasterizer::SampleState CudaRasterizer::SampleState::fromChunk(char *&chunk, size_t C)
-{
-	SampleState sample;
-	obtain(chunk, sample.bucket_to_tile, C * BLOCK_SIZE, 128);
-	obtain(chunk, sample.T, C * BLOCK_SIZE, 128);
-	obtain(chunk, sample.ar, NUM_CHANNELS_3DGS * C * BLOCK_SIZE, 128);
-	obtain(chunk, sample.ard, C * BLOCK_SIZE, 128);
-	return sample;
-}
-
-CudaRasterizer::BinningState CudaRasterizer::BinningState::fromChunk(char *&chunk, size_t P)
-{
-	BinningState binning;
-	obtain(chunk, binning.point_list, P, 128);
-	obtain(chunk, binning.point_list_unsorted, P, 128);
-	obtain(chunk, binning.point_list_keys, P, 128);
-	obtain(chunk, binning.point_list_keys_unsorted, P, 128);
-	cub::DeviceRadixSort::SortPairs(
-		nullptr, binning.sorting_size,
-		binning.point_list_keys_unsorted, binning.point_list_keys,
-		binning.point_list_unsorted, binning.point_list, P);
-	obtain(chunk, binning.list_sorting_space, binning.sorting_size, 128);
-	return binning;
-}
-
-__global__ void zero(int N, int *space)
-{
-	int idx = threadIdx.x + blockDim.x * blockIdx.x;
-	if (idx >= N)
-		return;
-	space[idx] = 0;
-}
-
-__global__ void set(int N, uint32_t *where, int *space)
-{
-	int idx = threadIdx.x + blockDim.x * blockIdx.x;
-	if (idx >= N)
-		return;
-
-	int off = (idx == 0) ? 0 : where[idx - 1];
-
-	space[off] = 1;
-}
-
-// Forward rendering procedure for differentiable rasterization
-// of Gaussians.
 std::tuple<int, int> CudaRasterizer::Rasterizer::forward(
 	std::function<char *(size_t)> geometryBuffer,
 	std::function<char *(size_t)> binningBuffer,
@@ -346,17 +29,13 @@ std::tuple<int, int> CudaRasterizer::Rasterizer::forward(
 	const float *means3D,
 	const float *dc,
 	const float *shs,
-	const float *colors_precomp,
 	const float *opacities,
 	const float *scales,
-	const float scale_modifier,
 	const float *rotations,
-	const float *cov3D_precomp,
 	const float *viewmatrix,
 	const float *projmatrix,
 	const float *cam_pos,
 	const float tan_fovx, float tan_fovy,
-	const bool prefiltered,
 	float *out_color,
 	float *invdepth,
 	bool antialiasing,
@@ -383,40 +62,31 @@ std::tuple<int, int> CudaRasterizer::Rasterizer::forward(
 	char *img_chunkptr = imageBuffer(img_chunk_size);
 	ImageState imgState = ImageState::fromChunk(img_chunkptr, width * height);
 
-	if (NUM_CHANNELS_3DGS != 3 && colors_precomp == nullptr)
-	{
-		throw std::runtime_error("For non-RGB, provide precomputed Gaussian colors!");
-	}
-
 	// Run preprocessing per-Gaussian (transformation, bounding, conversion of SHs to RGB)
-	CHECK_CUDA(FORWARD::preprocess(
-				   P, D, M,
-				   means3D,
-				   (glm::vec3 *)scales,
-				   scale_modifier,
-				   (glm::vec4 *)rotations,
-				   opacities,
-				   dc,
-				   shs,
-				   geomState.clamped,
-				   cov3D_precomp,
-				   colors_precomp,
-				   viewmatrix, projmatrix,
-				   (glm::vec3 *)cam_pos,
-				   width, height,
-				   focal_x, focal_y,
-				   tan_fovx, tan_fovy,
-				   radii,
-				   geomState.means2D,
-				   geomState.depths,
-				   geomState.cov3D,
-				   geomState.rgb,
-				   geomState.conic_opacity,
-				   tile_grid,
-				   geomState.tiles_touched,
-				   prefiltered,
-				   antialiasing),
-			   debug)
+	preprocessCUDA<<<(P + 255) / 256, 256>>>(
+		P, D, M,
+		means3D,
+		(glm::vec3 *)scales,
+		(glm::vec4 *)rotations,
+		opacities,
+		dc,
+		shs,
+		geomState.clamped,
+		viewmatrix,
+		projmatrix,
+		(glm::vec3 *)cam_pos,
+		width, height,
+		tan_fovx, tan_fovy,
+		focal_x, focal_y,
+		radii,
+		geomState.means2D,
+		geomState.depths,
+		geomState.cov3D,
+		geomState.rgb,
+		geomState.conic_opacity,
+		tile_grid,
+		geomState.tiles_touched,
+		antialiasing);
 
 	// Compute prefix sum over full list of touched tile counts by Gaussians
 	// E.g., [2, 3, 0, 2, 1] -> [2, 5, 5, 7, 8]
@@ -432,20 +102,19 @@ std::tuple<int, int> CudaRasterizer::Rasterizer::forward(
 
 	// For each instance to be rendered, produce adequate [ tile | depth ] key
 	// and corresponding dublicated Gaussian indices to be sorted
-	duplicateWithKeys<<<(P + 255) / 256, 256>>>(
+	duplicate_with_keys<<<(P + 255) / 256, 256>>>(
 		P,
 		geomState.means2D,
 		geomState.conic_opacity,
-		geomState.depths,
 		geomState.point_offsets,
-		binningState.point_list_keys_unsorted,
-		binningState.point_list_unsorted,
+		geomState.depths,
 		radii,
 		tile_grid,
-		nullptr)
+		binningState.point_list_keys_unsorted,
+		binningState.point_list_unsorted)
 		CHECK_CUDA(, debug)
 
-			int bit = getHigherMsb(tile_grid.x * tile_grid.y);
+	int bit = get_higher_msb(tile_grid.x * tile_grid.y);
 
 	// Sort complete list of (duplicated) Gaussian indices by keys
 	CHECK_CUDA(cub::DeviceRadixSort::SortPairs(
@@ -460,7 +129,7 @@ std::tuple<int, int> CudaRasterizer::Rasterizer::forward(
 
 	// Identify start and end of per-tile workloads in sorted list
 	if (num_rendered > 0)
-		identifyTileRanges<<<(num_rendered + 255) / 256, 256>>>(
+		identify_tile_ranges<<<(num_rendered + 255) / 256, 256>>>(
 			num_rendered,
 			binningState.point_list_keys,
 			imgState.ranges);
@@ -468,7 +137,7 @@ std::tuple<int, int> CudaRasterizer::Rasterizer::forward(
 
 	// bucket count
 	int num_tiles = tile_grid.x * tile_grid.y;
-	perTileBucketCount<<<(num_tiles + 255) / 256, 256>>>(num_tiles, imgState.ranges, imgState.bucket_count);
+	per_tile_bucket_count<<<(num_tiles + 255) / 256, 256>>>(num_tiles, imgState.ranges, imgState.bucket_count);
 	CHECK_CUDA(cub::DeviceScan::InclusiveSum(imgState.bucket_count_scanning_space, imgState.bucket_count_scan_size, imgState.bucket_count, imgState.bucket_offsets, num_tiles), debug)
 	unsigned int bucket_sum;
 	CHECK_CUDA(cudaMemcpy(&bucket_sum, imgState.bucket_offsets + num_tiles - 1, sizeof(unsigned int), cudaMemcpyDeviceToHost), debug);
@@ -478,25 +147,23 @@ std::tuple<int, int> CudaRasterizer::Rasterizer::forward(
 	SampleState sampleState = SampleState::fromChunk(sample_chunkptr, bucket_sum);
 
 	// Let each tile blend its range of Gaussians independently in parallel
-	const float *feature_ptr = colors_precomp != nullptr ? colors_precomp : geomState.rgb;
-	CHECK_CUDA(FORWARD::render(
-				   tile_grid, block,
-				   imgState.ranges,
-				   binningState.point_list,
-				   imgState.bucket_offsets, sampleState.bucket_to_tile,
-				   sampleState.T, sampleState.ar, sampleState.ard,
-				   width, height,
-				   geomState.means2D,
-				   feature_ptr,
-				   geomState.conic_opacity,
-				   imgState.accum_alpha,
-				   imgState.n_contrib,
-				   imgState.max_contrib,
-				   background,
-				   out_color,
-				   geomState.depths,
-				   invdepth),
-			   debug)
+	const float *feature_ptr = geomState.rgb;
+	renderCUDA<<<tile_grid, block>>>(
+		imgState.ranges,
+		binningState.point_list,
+		imgState.bucket_offsets, sampleState.bucket_to_tile,
+		sampleState.T, sampleState.ar, sampleState.ard,
+		width, height,
+		geomState.means2D,
+		feature_ptr,
+		geomState.conic_opacity,
+		imgState.accum_alpha,
+		imgState.n_contrib,
+		imgState.max_contrib,
+		background,
+		out_color,
+		geomState.depths,
+		invdepth);
 
 	CHECK_CUDA(cudaMemcpy(imgState.pixel_colors, out_color, sizeof(float) * width * height * NUM_CHANNELS_3DGS, cudaMemcpyDeviceToDevice), debug);
 	CHECK_CUDA(cudaMemcpy(imgState.pixel_invDepths, invdepth, sizeof(float) * width * height, cudaMemcpyDeviceToDevice), debug);
@@ -512,12 +179,10 @@ void CudaRasterizer::Rasterizer::backward(
 	const float *means3D,
 	const float *dc,
 	const float *shs,
-	const float *colors_precomp,
 	const float *opacities,
 	const float *scales,
 	const float scale_modifier,
 	const float *rotations,
-	const float *cov3D_precomp,
 	const float *viewmatrix,
 	const float *projmatrix,
 	const float *campos,
@@ -562,68 +227,269 @@ void CudaRasterizer::Rasterizer::backward(
 	// Compute loss gradients w.r.t. 2D mean position, conic matrix,
 	// opacity and RGB of Gaussians from per-pixel loss gradients.
 	// If we were given precomputed colors and not SHs, use them.
-	const float *color_ptr = (colors_precomp != nullptr) ? colors_precomp : geomState.rgb;
-	CHECK_CUDA(BACKWARD::render(
-				   tile_grid,
-				   block,
-				   imgState.ranges,
-				   binningState.point_list,
-				   width, height, R, B,
-				   imgState.bucket_offsets,
-				   sampleState.bucket_to_tile,
-				   sampleState.T,
-				   sampleState.ar,
-				   sampleState.ard,
-				   background,
-				   geomState.means2D,
-				   geomState.conic_opacity,
-				   color_ptr,
-				   geomState.depths,
-				   imgState.accum_alpha,
-				   imgState.n_contrib,
-				   imgState.max_contrib,
-				   imgState.pixel_colors,
-				   imgState.pixel_invDepths,
-				   dL_dpix,
-				   dL_invdepths,
-				   (float3 *)dL_dmean2D,
-				   (float4 *)dL_dconic,
-				   dL_dopacity,
-				   dL_dcolor,
-				   dL_dinvdepth),
-			   debug)
+	const float *color_ptr = geomState.rgb;
+	const int THREADS = 32;
+	PerGaussianRenderCUDA<<<((B * 32) + THREADS - 1) / THREADS, THREADS>>>(
+		imgState.ranges,
+		binningState.point_list,
+		width, height, B,
+		imgState.bucket_offsets,
+		sampleState.bucket_to_tile,
+		sampleState.T,
+		sampleState.ar,
+		sampleState.ard,
+		background,
+		geomState.means2D,
+		geomState.conic_opacity,
+		color_ptr,
+		geomState.depths,
+		imgState.accum_alpha,
+		imgState.n_contrib,
+		imgState.max_contrib,
+		imgState.pixel_colors,
+		imgState.pixel_invDepths,
+		dL_dpix,
+		dL_invdepths,
+		(glm::vec3 *)dL_dmean2D,
+		(glm::vec4 *)dL_dconic,
+		dL_dopacity,
+		dL_dcolor,
+		dL_dinvdepth);
 
 	// Take care of the rest of preprocessing. Was the precomputed covariance
 	// given to us or a scales/rot pair? If precomputed, pass that. If not,
 	// use the one we computed ourselves.
-	const float *cov3D_ptr = (cov3D_precomp != nullptr) ? cov3D_precomp : geomState.cov3D;
-	CHECK_CUDA(BACKWARD::preprocess(P, D, M,
-									(float3 *)means3D,
-									radii,
-									dc,
-									shs,
-									geomState.clamped,
-									opacities,
-									(glm::vec3 *)scales,
-									(glm::vec4 *)rotations,
-									scale_modifier,
-									cov3D_ptr,
-									viewmatrix,
-									projmatrix,
-									focal_x, focal_y,
-									tan_fovx, tan_fovy,
-									(glm::vec3 *)campos,
-									(float3 *)dL_dmean2D,
-									dL_dconic,
-									dL_dinvdepth,
-									dL_dopacity,
-									(glm::vec3 *)dL_dmean3D,
-									dL_dcolor,
-									dL_dcov3D,
-									dL_ddc,
-									dL_dsh,
-									(glm::vec3 *)dL_dscale,
-									(glm::vec4 *)dL_drot,
-									antialiasing),
-			   debug)
+	const float *cov3D_ptr = geomState.cov3D;
+	// Propagate gradients for the path of 2D conic matrix computation.
+	// Somewhat long, thus it is its own kernel rather than being part of
+	// "preprocess". When done, loss gradient w.r.t. 3D means has been
+	// modified and gradient w.r.t. 3D covariance matrix has been computed.
+	computeCov2DCUDA<<<(P + 255) / 256, 256>>>(
+		P,
+		(glm::vec3 *)means3D,
+		radii,
+		cov3D_ptr,
+		focal_x,
+		focal_y,
+		tan_fovx,
+		tan_fovy,
+		viewmatrix,
+		opacities,
+		dL_dconic,
+		dL_dopacity,
+		dL_dinvdepth,
+		(glm::vec3 *)dL_dmean3D,
+		dL_dcov3D,
+		antialiasing);
+
+	// Propagate gradients for remaining steps: finish 3D mean gradients,
+	// propagate color gradients to SH (if desireD), propagate 3D covariance
+	// matrix gradients to scale and rotation.
+	preprocessCUDABackward<<<(P + 255) / 256, 256>>>(
+		P, D, M,
+		(glm::vec3 *)means3D,
+		radii,
+		dc,
+		shs,
+		geomState.clamped,
+		(glm::vec3 *)scales,
+		(glm::vec4 *)rotations,
+		scale_modifier,
+		projmatrix,
+		(glm::vec3 *)campos,
+		(glm::vec3 *)dL_dmean2D,
+		(glm::vec3 *)dL_dmean3D,
+		dL_dcolor,
+		dL_dcov3D,
+		dL_ddc,
+		dL_dsh,
+		(glm::vec3 *)dL_dscale,
+		(glm::vec4 *)dL_drot,
+		dL_dopacity);
+}
+
+std::tuple<int, int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+RasterizeGaussiansCUDA(
+	const torch::Tensor &background,
+	const torch::Tensor &means3D,
+	const torch::Tensor &opacity,
+	const torch::Tensor &scales,
+	const torch::Tensor &rotations,
+	const torch::Tensor &viewmatrix,
+	const torch::Tensor &projmatrix,
+	const float tan_fovx,
+	const float tan_fovy,
+	const int image_height,
+	const int image_width,
+	const torch::Tensor &dc,
+	const torch::Tensor &sh,
+	const int degree,
+	const torch::Tensor &campos,
+	const bool antialiasing,
+	const bool debug)
+{
+	if (means3D.ndimension() != 2 || means3D.size(1) != 3)
+	{
+		AT_ERROR("means3D must have dimensions (num_points, 3)");
+	}
+
+	const int P = means3D.size(0);
+	const int H = image_height;
+	const int W = image_width;
+
+	// auto int_opts = means3D.options().dtype(torch::kInt32);
+	auto float_opts = means3D.options().dtype(torch::kFloat32);
+
+	torch::Tensor out_color = torch::full({NUM_CHANNELS_3DGS, H, W}, 0.0, float_opts);
+	torch::Tensor out_invdepth = torch::full({1, H, W}, 0.0, float_opts);
+	torch::Tensor radii = torch::full({P}, 0, means3D.options().dtype(torch::kInt32));
+
+	torch::Device device(torch::kCUDA);
+	torch::TensorOptions options(torch::kByte);
+	torch::Tensor geomBuffer = torch::empty({0}, options.device(device));
+	torch::Tensor binningBuffer = torch::empty({0}, options.device(device));
+	torch::Tensor imgBuffer = torch::empty({0}, options.device(device));
+	torch::Tensor sampleBuffer = torch::empty({0}, options.device(device));
+	std::function<char *(size_t)> geomFunc = resizeFunctional(geomBuffer);
+	std::function<char *(size_t)> binningFunc = resizeFunctional(binningBuffer);
+	std::function<char *(size_t)> imgFunc = resizeFunctional(imgBuffer);
+	std::function<char *(size_t)> sampleFunc = resizeFunctional(sampleBuffer);
+
+	int rendered = 0;
+	int num_buckets = 0;
+	if (P != 0)
+	{
+		int M = 0;
+		if (sh.size(0) != 0)
+		{
+			M = sh.size(1);
+		}
+
+		auto tup = CudaRasterizer::Rasterizer::forward(
+			geomFunc,
+			binningFunc,
+			imgFunc,
+			sampleFunc,
+			P, degree, M,
+			background.contiguous().data_ptr<float>(),
+			W, H,
+			means3D.contiguous().data_ptr<float>(),
+			dc.contiguous().data_ptr<float>(),
+			sh.contiguous().data_ptr<float>(),
+			// colors.contiguous().data_ptr<float>(),
+			opacity.contiguous().data_ptr<float>(),
+			scales.contiguous().data_ptr<float>(),
+			// scale_modifier,
+			rotations.contiguous().data_ptr<float>(),
+			// cov3D_precomp.contiguous().data_ptr<float>(),
+			viewmatrix.contiguous().data_ptr<float>(),
+			projmatrix.contiguous().data_ptr<float>(),
+			campos.contiguous().data_ptr<float>(),
+			tan_fovx,
+			tan_fovy,
+			// prefiltered,
+			out_color.contiguous().data_ptr<float>(),
+			out_invdepth.contiguous().data_ptr<float>(),
+			antialiasing,
+			radii.contiguous().data_ptr<int>(),
+			debug);
+
+		rendered = std::get<0>(tup);
+		num_buckets = std::get<1>(tup);
+	}
+	return std::make_tuple(rendered, num_buckets, out_color, out_invdepth, radii, geomBuffer, binningBuffer, imgBuffer, sampleBuffer);
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+RasterizeGaussiansBackwardCUDA(
+	const torch::Tensor &background,
+	const torch::Tensor &means3D,
+	const torch::Tensor &radii,
+	const torch::Tensor &opacities,
+	const torch::Tensor &scales,
+	const torch::Tensor &rotations,
+	const float scale_modifier,
+	const torch::Tensor &viewmatrix,
+	const torch::Tensor &projmatrix,
+	const float tan_fovx,
+	const float tan_fovy,
+	const torch::Tensor &dL_dout_color,
+	const torch::Tensor &dc,
+	const torch::Tensor &sh,
+	const torch::Tensor &dL_dout_invdepth,
+	const int degree,
+	const torch::Tensor &campos,
+	const torch::Tensor &geomBuffer,
+	const int R,
+	const torch::Tensor &binningBuffer,
+	const torch::Tensor &imageBuffer,
+	const int B,
+	const torch::Tensor &sampleBuffer,
+	const bool antialiasing,
+	const bool debug)
+{
+	const int P = means3D.size(0);
+	const int H = dL_dout_color.size(1);
+	const int W = dL_dout_color.size(2);
+
+	int M = 0;
+	if (sh.size(0) != 0)
+	{
+		M = sh.size(1);
+	}
+
+	torch::Tensor dL_dmeans3D = torch::zeros({P, 3}, means3D.options());
+	torch::Tensor dL_dmeans2D = torch::zeros({P, 3}, means3D.options());
+	torch::Tensor dL_dcolors = torch::zeros({P, NUM_CHANNELS_3DGS}, means3D.options());
+	torch::Tensor dL_dinvdepths = torch::zeros({P, 1}, means3D.options());
+	torch::Tensor dL_dconic = torch::zeros({P, 2, 2}, means3D.options());
+	torch::Tensor dL_dopacity = torch::zeros({P, 1}, means3D.options());
+	torch::Tensor dL_dcov3D = torch::zeros({P, 6}, means3D.options());
+	torch::Tensor dL_ddc = torch::zeros({P, 1, 3}, means3D.options());
+	torch::Tensor dL_dsh = torch::zeros({P, M, 3}, means3D.options());
+	torch::Tensor dL_dscales = torch::zeros({P, 3}, means3D.options());
+	torch::Tensor dL_drotations = torch::zeros({P, 4}, means3D.options()); // quats {P, 3, 3}
+
+	if (P != 0)
+	{
+		CudaRasterizer::Rasterizer::backward(P, degree, M, R, B,
+											 background.contiguous().data_ptr<float>(),
+											 W, H,
+											 means3D.contiguous().data_ptr<float>(),
+											 dc.contiguous().data_ptr<float>(),
+											 sh.contiguous().data_ptr<float>(),
+											 // colors.contiguous().data_ptr<float>(),
+											 opacities.contiguous().data_ptr<float>(),
+											 scales.data_ptr<float>(),
+											 scale_modifier,
+											 rotations.data_ptr<float>(),
+											 // cov3D_precomp.contiguous().data_ptr<float>(),
+											 viewmatrix.contiguous().data_ptr<float>(),
+											 projmatrix.contiguous().data_ptr<float>(),
+											 campos.contiguous().data_ptr<float>(),
+											 tan_fovx,
+											 tan_fovy,
+											 radii.contiguous().data_ptr<int>(),
+											 reinterpret_cast<char *>(geomBuffer.contiguous().data_ptr()),
+											 reinterpret_cast<char *>(binningBuffer.contiguous().data_ptr()),
+											 reinterpret_cast<char *>(imageBuffer.contiguous().data_ptr()),
+											 reinterpret_cast<char *>(sampleBuffer.contiguous().data_ptr()),
+											 dL_dout_color.contiguous().data_ptr<float>(),
+											 dL_dout_invdepth.contiguous().data_ptr<float>(),
+											 dL_dmeans2D.contiguous().data_ptr<float>(),
+											 dL_dconic.contiguous().data_ptr<float>(),
+											 dL_dopacity.contiguous().data_ptr<float>(),
+											 dL_dcolors.contiguous().data_ptr<float>(),
+											 dL_dinvdepths.contiguous().data_ptr<float>(),
+											 dL_dmeans3D.contiguous().data_ptr<float>(),
+											 dL_dcov3D.contiguous().data_ptr<float>(),
+											 dL_ddc.contiguous().data_ptr<float>(),
+											 dL_dsh.contiguous().data_ptr<float>(),
+											 dL_dscales.contiguous().data_ptr<float>(),
+											 dL_drotations.contiguous().data_ptr<float>(),
+											 antialiasing,
+											 debug);
+	}
+
+	return std::make_tuple(dL_dmeans2D, dL_dopacity, dL_dmeans3D, dL_ddc, dL_dsh, dL_dscales, dL_drotations);
 }

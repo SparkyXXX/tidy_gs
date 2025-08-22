@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 # set(CMAKE_BUILD_TYPE Debug)
 set(CMAKE_CUDA_HOST_COMPILER /usr/bin/g++)
-
+set(CMAKE_CUDA_ARCHITECTURES 89)
+set(CMAKE_CUDA_COMPILER /usr/local/cuda-11.8/bin/nvcc)
 project(DiffRast LANGUAGES CUDA CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -21,12 +22,11 @@ set(pybind11_DIR "${TORCH_INSTALL_PREFIX}/share/cmake/pybind11")
 find_package(pybind11 CONFIG REQUIRED)
 
 add_library(CudaRasterizer SHARED
-    cuda_rasterizer/backward.cu
-    cuda_rasterizer/forward.cu
-    cuda_rasterizer/rasterizer_impl.cu
-    cuda_rasterizer/adam.cu
-    rasterize_points.cu
-    conv.cu
+        cuda_rasterizer/adam.cu
+        cuda_rasterizer/forward.cu
+        cuda_rasterizer/backward.cu
+        cuda_rasterizer/rasterizer_impl.cu
+        cuda_rasterizer/auxiliary.cu
 )
 
 set_target_properties(CudaRasterizer PROPERTIES CUDA_ARCHITECTURES ${CUDA_ARCHITECTURES})
@@ -35,24 +35,24 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
 endif()
 
 target_include_directories(CudaRasterizer PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/cuda_rasterizer)
-target_include_directories(CudaRasterizer PRIVATE 
-    third_party/glm 
-    ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
-    ${TORCH_INCLUDE_DIRS}
-    ${Python_INCLUDE_DIRS}
+target_include_directories(CudaRasterizer PRIVATE
+        third_party/glm
+        ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
+        ${TORCH_INCLUDE_DIRS}
+        ${Python_INCLUDE_DIRS}
 )
 
-target_link_libraries(CudaRasterizer PRIVATE 
-    "${TORCH_LIBRARIES}" 
-    ${Python_LIBRARIES}
-    ${TORCH_PYTHON_LIBRARY}
+target_link_libraries(CudaRasterizer PRIVATE
+        "${TORCH_LIBRARIES}"
+        ${Python_LIBRARIES}
+        ${TORCH_PYTHON_LIBRARY}
 )
 
-pybind11_add_module(RUIXIANG_S_NB_TOOL SHARED ext.cpp)
-target_link_libraries(RUIXIANG_S_NB_TOOL PRIVATE 
-    CudaRasterizer 
-    "${TORCH_LIBRARIES}"
-    pybind11::module
-    ${TORCH_PYTHON_LIBRARY}
+pybind11_add_module(RUIXIANG_S_NB_TOOL SHARED ext.cu)
+target_link_libraries(RUIXIANG_S_NB_TOOL PRIVATE
+        CudaRasterizer
+        "${TORCH_LIBRARIES}"
+        pybind11::module
+        ${TORCH_PYTHON_LIBRARY}
 )
 target_include_directories(RUIXIANG_S_NB_TOOL PRIVATE ${TORCH_INCLUDE_DIRS})

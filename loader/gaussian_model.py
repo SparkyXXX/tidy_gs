@@ -1,10 +1,13 @@
 import os
+import sys
 import torch
 import numpy as np
 from torch import nn
 from plyfile import PlyData, PlyElement
 from utils.general_utils import mkdir_p, inverse_sigmoid, strip_symmetric, get_expon_lr_func
 from utils.graphics_utils import build_scaling_rotation, build_rotation, RGB2SH
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../submodules/diff-gaussian-rasterization')))
 from diff_gaussian_rasterization import SparseGaussianAdam
 from simple_knn._C import distCUDA2
 

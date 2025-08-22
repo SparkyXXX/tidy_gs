@@ -93,7 +93,7 @@ target_link_libraries(CudaRasterizer PRIVATE
     ${TORCH_PYTHON_LIBRARY}
 )
 
-pybind11_add_module(RUIXIANG_S_NB_TOOL SHARED ext.cpp)
+pybind11_add_module(RUIXIANG_S_NB_TOOL SHARED ext.cu)
 target_link_libraries(RUIXIANG_S_NB_TOOL PRIVATE 
     CudaRasterizer 
     "${TORCH_LIBRARIES}"
@@ -130,6 +130,23 @@ import torch.nn as nn
 import torch
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../build')))
 import RUIXIANG_S_NB_TOOL # type: ignore
+```
+
+将gaussian_model.py开头的导入部分改成这样
+
+```python
+import os
+import sys
+import torch
+import numpy as np
+from torch import nn
+from plyfile import PlyData, PlyElement
+from utils.general_utils import mkdir_p, inverse_sigmoid, strip_symmetric, get_expon_lr_func
+from utils.graphics_utils import build_scaling_rotation, build_rotation, RGB2SH
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../submodules/diff-gaussian-rasterization'))) # 主要是加上这句
+from diff_gaussian_rasterization import SparseGaussianAdam
+from simple_knn._C import distCUDA2
 ```
 
 然后cmake编译，第一次稍微慢一些，看到警告不要紧张，包没问题的

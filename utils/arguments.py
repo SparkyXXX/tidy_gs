@@ -50,7 +50,6 @@ class ModelParams(ParamGroup):
 
 class PipelineParams(ParamGroup):
     def __init__(self, parser):
-        self.debug = False
         self.antialiasing = False
         super().__init__(parser, "Pipeline Parameters")
 

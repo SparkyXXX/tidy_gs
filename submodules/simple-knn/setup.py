@@ -26,7 +26,7 @@ setup(
             sources=[
             "spatial.cu", 
             "simple_knn.cu",
-            "ext.cpp"],
+            "ext.cu"],
             extra_compile_args={"nvcc": [], "cxx": cxx_compiler_flags})
         ],
     cmdclass={

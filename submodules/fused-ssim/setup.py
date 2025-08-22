@@ -9,7 +9,7 @@ setup(
             name="fused_ssim_cuda",
             sources=[
             "ssim.cu",
-            "ext.cpp"])
+            "ext.cu"])
         ],
     cmdclass={
         'build_ext': BuildExtension

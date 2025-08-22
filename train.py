@@ -51,8 +51,6 @@ def training(model_params, opt_params, pipe_params, testing_iterations, saving_i
         vind = viewpoint_indices.pop(rand_idx)
 
         # Render
-        if (iteration - 1) == debug_from:
-            pipe_params.debug = True
         bg = torch.rand((3), device="cuda") if opt_params.random_background else background
         render_pkg = render(viewpoint_cam, gaussians, pipe_params, bg)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]

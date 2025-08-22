@@ -9,13 +9,25 @@
  * For inquiries contact  george.drettakis@inria.fr
  */
 
-#include "backward.h"
-#include "auxiliary.h"
+#include "backward.cuh"
+#include "auxiliary.cuh"
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
 namespace cg = cooperative_groups;
 
 __device__ __forceinline__ float sq(float x) { return x * x; }
+
+__device__ __forceinline__ glm::vec3 dnormvdv(const glm::vec3 &v, const glm::vec3 &dv)
+{
+	const float sum2 = v.x * v.x + v.y * v.y + v.z * v.z;
+	const float invsum32 = 1.0f / sqrt(sum2 * sum2 * sum2);
+
+	glm::vec3 dnormvdv;
+	dnormvdv.x = ((+sum2 - v.x * v.x) * dv.x - v.y * v.x * dv.y - v.z * v.x * dv.z) * invsum32;
+	dnormvdv.y = (-v.x * v.y * dv.x + (sum2 - v.y * v.y) * dv.y - v.z * v.y * dv.z) * invsum32;
+	dnormvdv.z = (-v.x * v.z * dv.x - v.y * v.z * dv.y + (sum2 - v.z * v.z) * dv.z) * invsum32;
+	return dnormvdv;
+}
 
 // Backward pass for conversion of spherical harmonics to RGB for
 // each Gaussian.
@@ -131,7 +143,7 @@ __device__ void computeColorFromSH(int idx, int deg, int max_coeffs, const glm::
 	glm::vec3 dL_ddir(glm::dot(dRGBdx, dL_dRGB), glm::dot(dRGBdy, dL_dRGB), glm::dot(dRGBdz, dL_dRGB));
 
 	// Account for normalization of direction
-	float3 dL_dmean = dnormvdv(float3{dir_orig.x, dir_orig.y, dir_orig.z}, float3{dL_ddir.x, dL_ddir.y, dL_ddir.z});
+	glm::vec3 dL_dmean = dnormvdv(glm::vec3{dir_orig.x, dir_orig.y, dir_orig.z}, glm::vec3{dL_ddir.x, dL_ddir.y, dL_ddir.z});
 
 	// Gradients of loss w.r.t. Gaussian means, but only the portion
 	// that is caused because the mean affects the view-dependent color.
@@ -143,7 +155,7 @@ __device__ void computeColorFromSH(int idx, int deg, int max_coeffs, const glm::
 // (due to length launched as separate kernel before other
 // backward steps contained in preprocess)
 __global__ void computeCov2DCUDA(int P,
-								 const float3 *means,
+								 const glm::vec3 *means,
 								 const int *radii,
 								 const float *cov3Ds,
 								 const float h_x, float h_y,
@@ -153,7 +165,7 @@ __global__ void computeCov2DCUDA(int P,
 								 const float *dL_dconics,
 								 float *dL_dopacity,
 								 const float *dL_dinvdepth,
-								 float3 *dL_dmeans,
+								 glm::vec3 *dL_dmeans,
 								 float *dL_dcov,
 								 bool antialiasing)
 {
@@ -166,9 +178,9 @@ __global__ void computeCov2DCUDA(int P,
 
 	// Fetch gradients, recompute 2D covariance and relevant
 	// intermediate forward results needed in the backward.
-	float3 mean = means[idx];
-	float3 dL_dconic = {dL_dconics[4 * idx], dL_dconics[4 * idx + 1], dL_dconics[4 * idx + 3]};
-	float3 t = transformPoint4x3(mean, view_matrix);
+	glm::vec3 mean = means[idx];
+	glm::vec3 dL_dconic = {dL_dconics[4 * idx], dL_dconics[4 * idx + 1], dL_dconics[4 * idx + 3]};
+	glm::vec3 t = transformPoint4x3(mean, view_matrix);
 
 	const float limx = 1.3f * tan_fovx;
 	const float limy = 1.3f * tan_fovy;
@@ -310,7 +322,7 @@ __global__ void computeCov2DCUDA(int P,
 
 	// Account for transformation of mean to t
 	// t = transformPoint4x3(mean, view_matrix);
-	float3 dL_dmean = transformVec4x3Transpose({dL_dtx, dL_dty, dL_dtz}, view_matrix);
+	glm::vec3 dL_dmean = transformVec4x3Transpose({dL_dtx, dL_dty, dL_dtz}, view_matrix);
 
 	// Gradients of loss w.r.t. Gaussian means, but only the portion
 	// that is caused because the mean affects the covariance matrix.
@@ -379,17 +391,16 @@ __device__ void computeCov3D(int idx, const glm::vec3 scale, float mod, const gl
 	dL_dq.w = 2 * r * (dL_dMt[0][1] - dL_dMt[1][0]) + 2 * x * (dL_dMt[2][0] + dL_dMt[0][2]) + 2 * y * (dL_dMt[1][2] + dL_dMt[2][1]) - 4 * z * (dL_dMt[1][1] + dL_dMt[0][0]);
 
 	// Gradients of loss w.r.t. unnormalized quaternion
-	float4 *dL_drot = (float4 *)(dL_drots + idx);
-	*dL_drot = float4{dL_dq.x, dL_dq.y, dL_dq.z, dL_dq.w}; // dnormvdv(float4{ rot.x, rot.y, rot.z, rot.w }, float4{ dL_dq.x, dL_dq.y, dL_dq.z, dL_dq.w });
+	glm::vec4 *dL_drot = (glm::vec4 *)(dL_drots + idx);
+	*dL_drot = glm::vec4{dL_dq.x, dL_dq.y, dL_dq.z, dL_dq.w};
 }
 
 // Backward pass of the preprocessing steps, except
 // for the covariance computation and inversion
 // (those are handled by a previous kernel call)
-template <int C>
-__global__ void preprocessCUDA(
+__global__ void preprocessCUDABackward(
 	int P, int D, int M,
-	const float3 *means,
+	const glm::vec3 *means,
 	const int *radii,
 	const float *dc,
 	const float *shs,
@@ -399,7 +410,7 @@ __global__ void preprocessCUDA(
 	const float scale_modifier,
 	const float *proj,
 	const glm::vec3 *campos,
-	const float3 *dL_dmean2D,
+	const glm::vec3 *dL_dmean2D,
 	glm::vec3 *dL_dmeans,
 	float *dL_dcolor,
 	float *dL_dcov3D,
@@ -413,10 +424,10 @@ __global__ void preprocessCUDA(
 	if (idx >= P || !(radii[idx] > 0))
 		return;
 
-	float3 m = means[idx];
+	glm::vec3 m = means[idx];
 
 	// Taking care of gradients from the screenspace points
-	float4 m_hom = transformPoint4x4(m, proj);
+	glm::vec4 m_hom = transformPoint4x4(m, proj);
 	float m_w = 1.0f / (m_hom.w + 0.0000001f);
 
 	// Compute loss gradient w.r.t. 3D means due to gradients of 2D means
@@ -441,7 +452,6 @@ __global__ void preprocessCUDA(
 		computeCov3D(idx, scales[idx], scale_modifier, rotations[idx], dL_dcov3D, dL_dscale, dL_drot);
 }
 
-template <uint32_t C>
 __global__ void
 PerGaussianRenderCUDA(
 	const uint2 *__restrict__ ranges,
@@ -451,8 +461,8 @@ PerGaussianRenderCUDA(
 	const uint32_t *__restrict__ bucket_to_tile,
 	const float *__restrict__ sampled_T, const float *__restrict__ sampled_ar, const float *__restrict__ sampled_ard,
 	const float *__restrict__ bg_color,
-	const float2 *__restrict__ points_xy_image,
-	const float4 *__restrict__ conic_opacity,
+	const glm::vec2 *__restrict__ points_xy_image,
+	const glm::vec4 *__restrict__ conic_opacity,
 	const float *__restrict__ colors,
 	const float *__restrict__ depths,
 	const float *__restrict__ final_Ts,
@@ -462,8 +472,8 @@ PerGaussianRenderCUDA(
 	const float *__restrict__ pixel_invDepths,
 	const float *__restrict__ dL_dpixels,
 	const float *__restrict__ dL_invdepths,
-	float3 *__restrict__ dL_dmean2D,
-	float4 *__restrict__ dL_dconic2D,
+	glm::vec3 *__restrict__ dL_dmean2D,
+	glm::vec4 *__restrict__ dL_dconic2D,
 	float *__restrict__ dL_dopacity,
 	float *__restrict__ dL_dcolors,
 	float *__restrict__ dL_dinvdepths)
@@ -501,17 +511,17 @@ PerGaussianRenderCUDA(
 
 	// Load Gaussian properties into registers
 	int gaussian_idx = 0;
-	float2 xy = {0.0f, 0.0f};
-	float4 con_o = {0.0f, 0.0f, 0.0f, 0.0f};
-	float c[C] = {0.0f};
+	glm::vec2 xy = {0.0f, 0.0f};
+	glm::vec4 con_o = {0.0f, 0.0f, 0.0f, 0.0f};
+	float c[NUM_CHANNELS_3DGS] = {0.0f};
 	float invd = 0.f;
 	if (valid_splat)
 	{
 		gaussian_idx = point_list[splat_idx_global];
 		xy = points_xy_image[gaussian_idx];
 		con_o = conic_opacity[gaussian_idx];
-		for (int ch = 0; ch < C; ++ch)
-			c[ch] = colors[gaussian_idx * C + ch];
+		for (int ch = 0; ch < NUM_CHANNELS_3DGS; ++ch)
+			c[ch] = colors[gaussian_idx * NUM_CHANNELS_3DGS + ch];
 		invd = 1.f / depths[gaussian_idx];
 	}
 
@@ -522,7 +532,7 @@ PerGaussianRenderCUDA(
 	float Register_dL_dconic2D_y = 0.0f;
 	float Register_dL_dconic2D_w = 0.0f;
 	float Register_dL_dopacity = 0.0f;
-	float Register_dL_dcolors[C] = {0.0f};
+	float Register_dL_dcolors[NUM_CHANNELS_3DGS] = {0.0f};
 	float Register_dL_dinvdepths = 0.0f;
 
 	// tile metadata
@@ -534,9 +544,9 @@ PerGaussianRenderCUDA(
 	float T;
 	float T_final;
 	float last_contributor;
-	float ar[C];
+	float ar[NUM_CHANNELS_3DGS];
 	float ard;
-	float dL_dpixel[C];
+	float dL_dpixel[NUM_CHANNELS_3DGS];
 	float dL_invdepth;
 	const float ddelx_dx = 0.5 * W;
 	const float ddely_dy = 0.5 * H;
@@ -551,7 +561,7 @@ PerGaussianRenderCUDA(
 		T = my_warp.shfl_up(T, 1);
 		last_contributor = my_warp.shfl_up(last_contributor, 1);
 		T_final = my_warp.shfl_up(T_final, 1);
-		for (int ch = 0; ch < C; ++ch)
+		for (int ch = 0; ch < NUM_CHANNELS_3DGS; ++ch)
 		{
 			ar[ch] = my_warp.shfl_up(ar[ch], 1);
 			dL_dpixel[ch] = my_warp.shfl_up(dL_dpixel[ch], 1);
@@ -563,7 +573,7 @@ PerGaussianRenderCUDA(
 		int idx = i - my_warp.thread_rank();
 		const uint2 pix = {pix_min.x + idx % BLOCK_X, pix_min.y + idx / BLOCK_X};
 		const uint32_t pix_id = W * pix.y + pix.x;
-		const float2 pixf = {(float)pix.x, (float)pix.y};
+		const glm::vec2 pixf = {(float)pix.x, (float)pix.y};
 		bool valid_pixel = pix.x < W && pix.y < H;
 
 		// every 32nd thread should read the stored state from memory
@@ -571,12 +581,12 @@ PerGaussianRenderCUDA(
 		if (valid_splat && valid_pixel && my_warp.thread_rank() == 0 && idx < BLOCK_SIZE)
 		{
 			T = sampled_T[global_bucket_idx * BLOCK_SIZE + idx];
-			for (int ch = 0; ch < C; ++ch)
-				ar[ch] = -pixel_colors[ch * H * W + pix_id] + sampled_ar[global_bucket_idx * BLOCK_SIZE * C + ch * BLOCK_SIZE + idx];
+			for (int ch = 0; ch < NUM_CHANNELS_3DGS; ++ch)
+				ar[ch] = -pixel_colors[ch * H * W + pix_id] + sampled_ar[global_bucket_idx * BLOCK_SIZE * NUM_CHANNELS_3DGS + ch * BLOCK_SIZE + idx];
 			ard = -pixel_invDepths[pix_id] + sampled_ard[global_bucket_idx * BLOCK_SIZE + idx];
 			T_final = final_Ts[pix_id];
 			last_contributor = n_contrib[pix_id];
-			for (int ch = 0; ch < C; ++ch)
+			for (int ch = 0; ch < NUM_CHANNELS_3DGS; ++ch)
 			{
 				dL_dpixel[ch] = dL_dpixels[ch * H * W + pix_id];
 			}
@@ -593,7 +603,7 @@ PerGaussianRenderCUDA(
 				continue;
 
 			// compute blending values
-			const float2 d = {xy.x - pixf.x, xy.y - pixf.y};
+			const glm::vec2 d = {xy.x - pixf.x, xy.y - pixf.y};
 			const float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
 			if (power > 0.0f)
 				continue;
@@ -606,7 +616,7 @@ PerGaussianRenderCUDA(
 			// add the gradient contribution of this pixel's colour to the gaussian
 			float bg_dot_dpixel = 0.0f;
 			float dL_dalpha = 0.0f;
-			for (int ch = 0; ch < C; ++ch)
+			for (int ch = 0; ch < NUM_CHANNELS_3DGS; ++ch)
 			{
 				ar[ch] += weight * c[ch]; // TODO: check
 				const float &dL_dchannel = dL_dpixel[ch];
@@ -654,141 +664,10 @@ PerGaussianRenderCUDA(
 		atomicAdd(&dL_dconic2D[gaussian_idx].y, Register_dL_dconic2D_y);
 		atomicAdd(&dL_dconic2D[gaussian_idx].w, Register_dL_dconic2D_w);
 		atomicAdd(&dL_dopacity[gaussian_idx], Register_dL_dopacity);
-		for (int ch = 0; ch < C; ++ch)
+		for (int ch = 0; ch < NUM_CHANNELS_3DGS; ++ch)
 		{
-			atomicAdd(&dL_dcolors[gaussian_idx * C + ch], Register_dL_dcolors[ch]);
+			atomicAdd(&dL_dcolors[gaussian_idx * NUM_CHANNELS_3DGS + ch], Register_dL_dcolors[ch]);
 		}
 		atomicAdd(&dL_dinvdepths[gaussian_idx], Register_dL_dinvdepths);
 	}
-}
-
-void BACKWARD::preprocess(
-	int P, int D, int M,
-	const float3 *means3D,
-	const int *radii,
-	const float *dc,
-	const float *shs,
-	const bool *clamped,
-	const float *opacities,
-	const glm::vec3 *scales,
-	const glm::vec4 *rotations,
-	const float scale_modifier,
-	const float *cov3Ds,
-	const float *viewmatrix,
-	const float *projmatrix,
-	const float focal_x, float focal_y,
-	const float tan_fovx, float tan_fovy,
-	const glm::vec3 *campos,
-	const float3 *dL_dmean2D,
-	const float *dL_dconic,
-	const float *dL_dinvdepth,
-	float *dL_dopacity,
-	glm::vec3 *dL_dmean3D,
-	float *dL_dcolor,
-	float *dL_dcov3D,
-	float *dL_ddc,
-	float *dL_dsh,
-	glm::vec3 *dL_dscale,
-	glm::vec4 *dL_drot,
-	bool antialiasing)
-{
-	// Propagate gradients for the path of 2D conic matrix computation.
-	// Somewhat long, thus it is its own kernel rather than being part of
-	// "preprocess". When done, loss gradient w.r.t. 3D means has been
-	// modified and gradient w.r.t. 3D covariance matrix has been computed.
-	computeCov2DCUDA<<<(P + 255) / 256, 256>>>(
-		P,
-		means3D,
-		radii,
-		cov3Ds,
-		focal_x,
-		focal_y,
-		tan_fovx,
-		tan_fovy,
-		viewmatrix,
-		opacities,
-		dL_dconic,
-		dL_dopacity,
-		dL_dinvdepth,
-		(float3 *)dL_dmean3D,
-		dL_dcov3D,
-		antialiasing);
-
-	// Propagate gradients for remaining steps: finish 3D mean gradients,
-	// propagate color gradients to SH (if desireD), propagate 3D covariance
-	// matrix gradients to scale and rotation.
-	preprocessCUDA<NUM_CHANNELS_3DGS><<<(P + 255) / 256, 256>>>(
-		P, D, M,
-		(float3 *)means3D,
-		radii,
-		dc,
-		shs,
-		clamped,
-		(glm::vec3 *)scales,
-		(glm::vec4 *)rotations,
-		scale_modifier,
-		projmatrix,
-		campos,
-		(float3 *)dL_dmean2D,
-		(glm::vec3 *)dL_dmean3D,
-		dL_dcolor,
-		dL_dcov3D,
-		dL_ddc,
-		dL_dsh,
-		dL_dscale,
-		dL_drot,
-		dL_dopacity);
-}
-
-void BACKWARD::render(
-	const dim3 grid, dim3 block,
-	const uint2 *ranges,
-	const uint32_t *point_list,
-	int W, int H, int R, int B,
-	const uint32_t *per_bucket_tile_offset,
-	const uint32_t *bucket_to_tile,
-	const float *sampled_T, const float *sampled_ar, const float *sampled_ard,
-	const float *bg_color,
-	const float2 *means2D,
-	const float4 *conic_opacity,
-	const float *colors,
-	const float *depths,
-	const float *final_Ts,
-	const uint32_t *n_contrib,
-	const uint32_t *max_contrib,
-	const float *pixel_colors,
-	const float *pixel_invDepths,
-	const float *dL_dpixels,
-	const float *dL_invdepths,
-	float3 *dL_dmean2D,
-	float4 *dL_dconic2D,
-	float *dL_dopacity,
-	float *dL_dcolors,
-	float *dL_dinvdepths)
-{
-	const int THREADS = 32;
-	PerGaussianRenderCUDA<NUM_CHANNELS_3DGS><<<((B * 32) + THREADS - 1) / THREADS, THREADS>>>(
-		ranges,
-		point_list,
-		W, H, B,
-		per_bucket_tile_offset,
-		bucket_to_tile,
-		sampled_T, sampled_ar, sampled_ard,
-		bg_color,
-		means2D,
-		conic_opacity,
-		colors,
-		depths,
-		final_Ts,
-		n_contrib,
-		max_contrib,
-		pixel_colors,
-		pixel_invDepths,
-		dL_dpixels,
-		dL_invdepths,
-		dL_dmean2D,
-		dL_dconic2D,
-		dL_dopacity,
-		dL_dcolors,
-		dL_dinvdepths);
 }
