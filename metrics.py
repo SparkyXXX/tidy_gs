@@ -7,7 +7,8 @@ from tqdm import tqdm
 from PIL import Image
 from pathlib import Path
 from argparse import ArgumentParser
-from utils.graphics_utils import psnr, ssim
+from utils.graphics_utils import psnr
+from fused_ssim import fused_ssim
 from utils.lpipsPyTorch import lpips
 
 def readImages(renders_dir, gt_dir):
@@ -47,13 +48,13 @@ def evaluate(model_paths):
             gt_dir = method_dir/ "gt"
             renders_dir = method_dir / "renders"
             renders, gts, image_names = readImages(renders_dir, gt_dir)
-            
+
             ssims = []
             psnrs = []
             lpipss = []
             for idx in tqdm(range(len(renders)), desc="Metric evaluation progress"):
                 psnrs.append(psnr(renders[idx], gts[idx]))
-                ssims.append(ssim(renders[idx], gts[idx]))
+                ssims.append(fused_ssim(renders[idx], gts[idx]))
                 lpipss.append(lpips(renders[idx], gts[idx], net_type='vgg'))
             print("  SSIM : {:>12.7f}".format(torch.tensor(ssims).mean(), ".5"))
             print("  PSNR : {:>12.7f}".format(torch.tensor(psnrs).mean(), ".5"))
